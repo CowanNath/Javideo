@@ -1,0 +1,18 @@
+# deps
+node_modules/
+
+# build output
+dist/
+src-tauri/target/
+src-tauri/binaries/*.exe
+
+# .NET
+worker/bin/
+worker/obj/
+
+# logs / local
+*.log
+.tmp/
+
+# release deliverables (attached to GitHub releases instead)
+Javideo-app/
