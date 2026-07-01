@@ -1,4 +1,4 @@
-﻿# Javideo
+# Javideo
 
 鏈湴鐣彿褰辩墖鍒墛銆佺鍔涙悳绱笌濯掍綋搴撶鐞嗗伐鍏凤紙Windows 妗岄潰杞欢锛夈€?
 ![search](https://img.shields.io/badge/status-v1.0.0-green)
