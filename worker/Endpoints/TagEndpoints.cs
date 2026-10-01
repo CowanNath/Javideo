@@ -1,6 +1,7 @@
 using Dapper;
 using Javideo.Worker.Db;
 using Javideo.Worker.Models;
+using Microsoft.Data.Sqlite;
 
 namespace Javideo.Worker.Endpoints;
 
@@ -34,13 +35,27 @@ public static class TagEndpoints
         {
             await using var c = db.Create();
             await c.OpenAsync();
-            var movies = await c.QueryAsync<Movie>(@"
+            var movies = (await c.QueryAsync<Movie>(@"
                 SELECT m.id Id, m.number Number, m.title Title, m.cover_url CoverUrl,
-                       m.thumb_url ThumbUrl, m.release_date ReleaseDate
+                       m.thumb_url ThumbUrl, m.release_date ReleaseDate, m.folder_path FolderPath,
+                       m.source_path SourcePath
                 FROM movies m
                 JOIN movie_tags mt ON mt.movie_id=m.id
                 WHERE mt.tag_id=@id
-                ORDER BY m.release_date DESC", new { id });
+                ORDER BY m.release_date DESC", new { id })).ToList();
+            // Local image endpoints, same reasoning as ActorEndpoints/movies —
+            // raw MetaTube URLs break whenever that server is unreachable.
+            foreach (var m in movies)
+            {
+                if (!string.IsNullOrWhiteSpace(m.CoverUrl))
+                    m.CoverUrl = $"/api/movies/{m.Id}/image/poster";
+                if (!string.IsNullOrWhiteSpace(m.ThumbUrl))
+                    m.ThumbUrl = $"/api/movies/{m.Id}/image/thumb";
+                // Card badges: video file present / trailer downloaded.
+                m.HasVideo = MovieEndpoints.HasVideoFile(m.FolderPath, m.Number ?? "", m.SourcePath);
+                m.HasTrailer = !string.IsNullOrWhiteSpace(m.FolderPath)
+                    && File.Exists(Path.Combine(m.FolderPath, $"{m.Number}-trailer.mp4"));
+            }
             return Results.Ok(movies);
         });
 
@@ -67,7 +82,17 @@ public static class TagEndpoints
                 return Results.NotFound(new { ok = false, detail = "标签不存在" });
             if (tag.IsStandard && tag.Category != "custom")
                 return Results.BadRequest(new { ok = false, detail = "标准标签不可编辑" });
-            await c.ExecuteAsync("UPDATE tags SET name=@name WHERE id=@id", new { id, name = req.Name.Trim() });
+            var name = req.Name?.Trim();
+            if (string.IsNullOrWhiteSpace(name))
+                return Results.BadRequest(new { ok = false, detail = "标签名不能为空" });
+            try
+            {
+                await c.ExecuteAsync("UPDATE tags SET name=@name WHERE id=@id", new { id, name });
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 19) // UNIQUE constraint
+            {
+                return Results.Conflict(new { ok = false, detail = "同名标签已存在" });
+            }
             return Results.Ok(new { ok = true, detail = "标签已更新" });
         });
     }

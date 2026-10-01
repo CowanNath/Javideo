@@ -62,6 +62,10 @@ public sealed class TranslationService
 
     public async Task<Movie?> TranslateAsync(Movie movie)
     {
+        // Nothing to translate (metadata empty) — don't waste an LLM call.
+        if (string.IsNullOrWhiteSpace(movie.Title) && string.IsNullOrWhiteSpace(movie.Summary))
+            return movie;
+
         var (ep, key, model) = await GetConfigAsync();
         if (string.IsNullOrWhiteSpace(ep)) return movie;
 

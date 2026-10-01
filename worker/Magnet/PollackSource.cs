@@ -18,8 +18,9 @@ public sealed class PollackSource : HtmlMagnetSourceBase
     protected override IEnumerable<string> SearchUrls(string query)
     {
         // Verified live URL is LOWERCASE: /search/snos-025_ctime_1.html
-        var raw = query.Trim().ToLowerInvariant();
-        var orig = query.Trim();
+        // Path segments must be escaped — a raw " " or "&" breaks the URL.
+        var raw = Uri.EscapeDataString(query.Trim().ToLowerInvariant());
+        var orig = Uri.EscapeDataString(query.Trim());
         var q = Uri.EscapeDataString(query);
         // Primary observed pattern (lowercase 番号).
         yield return $"{BaseUrl}/search/{raw}_ctime_1.html";

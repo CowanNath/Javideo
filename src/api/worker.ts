@@ -45,6 +45,20 @@ export async function getBaseUrl(): Promise<string> {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await doReq<T>(path, init)
+  } catch (e) {
+    if (e instanceof TypeError) {
+      // Network-level failure (worker restarted on a new port / not up yet).
+      // Forget the cached base URL so the next call re-probes the sidecar
+      // instead of hammering a dead port forever.
+      baseUrl = null
+    }
+    throw e
+  }
+}
+
+async function doReq<T>(path: string, init?: RequestInit): Promise<T> {
   const base = await getBaseUrl()
   const resp = await fetch(`${base}${path}`, {
     ...init,
@@ -82,15 +96,41 @@ export const libraries = {
 }
 
 // ---- Movies ----
+// Rewrite covers/thumbs to the local image endpoints (same reasoning as the
+// worker side: the webview can't load remote DMM URLs directly).
+async function hydrateCovers(list: import('../types').Movie[]): Promise<import('../types').Movie[]> {
+  await Promise.all(list.map(async (m) => {
+    m.coverUrl = await absoluteAvatar(m.coverUrl)
+    m.thumbUrl = await absoluteAvatar(m.thumbUrl)
+  }))
+  return list
+}
+
+// Hydrate actor avatar paths (local endpoint) to absolute URLs.
+async function hydrateActorAvatars(actors?: import('../types').Actor[]) {
+  if (!actors?.length) return
+  await Promise.all(actors.map(async (a) => { a.avatarUrl = await absoluteAvatar(a.avatarUrl) }))
+}
+
 export const movies = {
+  // All ingested movies across every library (the virtual "全部" library).
+  all: async (): Promise<import('../types').Movie[]> =>
+    hydrateCovers((await req<import('../types').Movie[]>('/api/movies/library/all')) ?? []),
   byLibrary: async (libraryId: number): Promise<import('../types').Movie[]> => {
-    const list = await req<import('../types').Movie[]>(`/api/movies/library/${libraryId}`)
-    // Hydrate relative local-image paths to absolute URLs.
-    await Promise.all(list.map(async (m) => {
-      m.coverUrl = await absoluteAvatar(m.coverUrl)
-      m.thumbUrl = await absoluteAvatar(m.thumbUrl)
-    }))
-    return list
+    const list = (await req<import('../types').Movie[]>(`/api/movies/library/${libraryId}`)) ?? []
+    return hydrateCovers(list)
+  },
+  // Look up an ingested movie by 番号 (any library). 404 → throws; caller
+  // falls back to scraping. Hydrates local image paths like get().
+  byNumber: async (number: string): Promise<import('../types').Movie | null> => {
+    const m = await req<import('../types').Movie | null>(`/api/movies/by-number/${encodeURIComponent(number)}`)
+    if (!m) return null
+    m.coverUrl = await absoluteAvatar(m.coverUrl)
+    m.thumbUrl = await absoluteAvatar(m.thumbUrl)
+    if (m.previewImages?.length)
+      m.previewImages = await Promise.all(m.previewImages.map(async (u) => await absoluteAvatar(u) ?? u))
+    await hydrateActorAvatars(m.actors)
+    return m
   },
   get: async (id: number): Promise<import('../types').Movie> => {
     const m = await req<import('../types').Movie>(`/api/movies/${id}`)
@@ -99,6 +139,7 @@ export const movies = {
     m.thumbUrl = await absoluteAvatar(m.thumbUrl)
     if (m.previewImages?.length)
       m.previewImages = await Promise.all(m.previewImages.map(async (u) => await absoluteAvatar(u) ?? u))
+    await hydrateActorAvatars(m.actors)
     return m
   },
   ingest: (libraryId: number, movie: import('../types').Movie, magnets?: import('../types').MagnetResult[]) =>
@@ -118,6 +159,25 @@ export const movies = {
       method: 'POST',
       body: JSON.stringify({ Name: name }),
     }),
+  // Add an actor to a movie (find-or-create by name; survives rescrape).
+  addActor: (id: number, name: string) =>
+    req<{ ok: boolean; detail: string }>(`/api/movies/${id}/actors`, {
+      method: 'POST',
+      body: JSON.stringify({ Name: name }),
+    }),
+  // Remove an actor link from a movie.
+  removeActor: (id: number, actorId: number) =>
+    req<{ ok: boolean; detail: string }>(`/api/movies/${id}/actors/${actorId}`, { method: 'DELETE' }),
+  // Subtitle matching via Thunder's API (GCID computed & cached server-side).
+  subtitles: {
+    list: (id: number) =>
+      req<{ ok: boolean; gcid: string; subtitles: import('../types').SubtitleItem[]; detail: string }>(`/api/movies/${id}/subtitles`),
+    download: (id: number, url: string) =>
+      req<{ ok: boolean; detail: string }>(`/api/movies/${id}/subtitles/download`, {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+      }),
+  },
   // Play a movie's local file in the configured player.
   play: (id: number) =>
     req<{ ok: boolean; detail: string }>(`/api/movies/${id}/play`, { method: 'POST' }),
@@ -133,6 +193,11 @@ export const movies = {
     req<{ ok: boolean; detail: string }>(`/api/movies/${id}/rescrape-pick`, {
       method: 'POST',
       body: JSON.stringify({ Provider: provider, Id: movId }),
+    }),
+  move: (id: number, targetLibraryId: number) =>
+    req<{ ok: boolean; detail: string }>(`/api/movies/${id}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ TargetLibraryId: targetLibraryId }),
     }),
 }
 
@@ -214,8 +279,13 @@ export const settings = {
 
 // ---- Favorites ----
 export const favorites = {
-  list: (type: import('../types').FavoriteTarget) =>
-    req<import('../types').Favorite[]>(`/api/favorites/${type}`),
+  // Hydrate cover paths to absolute (same Tracking-Prevention reasoning as
+  // movies.byLibrary — raw remote URLs fail to load in the webview).
+  list: async (type: import('../types').FavoriteTarget): Promise<import('../types').Favorite[]> => {
+    const list = (await req<import('../types').Favorite[]>(`/api/favorites/${type}`)) ?? []
+    await Promise.all(list.map(async (it) => { it.cover = await absoluteAvatar(it.cover) }))
+    return list
+  },
   ids: (type: import('../types').FavoriteTarget) =>
     req<number[]>(`/api/favorites/${type}/ids`),
   add: (type: import('../types').FavoriteTarget, targetId: number) =>
@@ -232,7 +302,7 @@ export const favorites = {
 // ---- Actors ----
 // Resolve a possibly-relative avatar URL (returned as "/api/actors/{id}/avatar"
 // by the worker) to a full URL for <img src>.
-async function absoluteAvatar(url?: string | null): Promise<string | null | undefined> {
+export async function absoluteAvatar(url?: string | null): Promise<string | null | undefined> {
   if (!url) return url
   if (/^https?:\/\//i.test(url)) return url
   return (await getBaseUrl()) + url
@@ -245,12 +315,39 @@ export const actors = {
     await Promise.all(list.map(async (a) => { a.avatarUrl = await absoluteAvatar(a.avatarUrl) }))
     return list
   },
-  movies: (id: number) => req<import('../types').Movie[]>(`/api/actors/${id}/movies`),
+  // Hydrate like movies.byLibrary — the webview blocks remote cover URLs, so
+  // cards here would render without images otherwise.
+  movies: async (id: number): Promise<import('../types').Movie[]> => {
+    const list = (await req<import('../types').Movie[]>(`/api/actors/${id}/movies`)) ?? []
+    await Promise.all(list.map(async (m) => {
+      m.coverUrl = await absoluteAvatar(m.coverUrl)
+      m.thumbUrl = await absoluteAvatar(m.thumbUrl)
+    }))
+    return list
+  },
   detail: async (id: number): Promise<import('../types').ActorDetailResponse> => {
     const res = await req<import('../types').ActorDetailResponse>(`/api/actors/${id}/detail`)
     if (res.actor) res.actor.avatarUrl = await absoluteAvatar(res.actor.avatarUrl)
+    // Detail movies now carry local cover endpoints → hydrate to absolute.
+    await Promise.all((res.movies ?? []).map(async (m) => {
+      m.coverUrl = await absoluteAvatar(m.coverUrl)
+      m.thumbUrl = await absoluteAvatar(m.thumbUrl)
+    }))
     return res
   },
+  // Rename an actor (global — actors are shared entities).
+  rename: (id: number, name: string) =>
+    req<{ ok: boolean; detail: string }>(`/api/actors/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ Name: name }),
+    }),
+  // Resolve local avatar endpoints for a batch of actor names (search page,
+  // pre-ingest). Unknown names are looked up via MetaTube and registered.
+  resolveAvatars: (names: string[]) =>
+    req<Record<string, string | null>>('/api/actors/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ names }),
+    }),
 }
 
 // ---- Tags ----
@@ -262,7 +359,14 @@ export const tags = {
     const q = qs.toString()
     return req<import('../types').Tag[]>(`/api/tags${q ? `?${q}` : ''}`)
   },
-  movies: (id: number) => req<import('../types').Movie[]>(`/api/tags/${id}/movies`),
+  movies: async (id: number): Promise<import('../types').Movie[]> => {
+    const list = (await req<import('../types').Movie[]>(`/api/tags/${id}/movies`)) ?? []
+    await Promise.all(list.map(async (m) => {
+      m.coverUrl = await absoluteAvatar(m.coverUrl)
+      m.thumbUrl = await absoluteAvatar(m.thumbUrl)
+    }))
+    return list
+  },
   info: (id: number) => req<import('../types').Tag>(`/api/tags/${id}/info`),
   rename: (id: number, name: string) =>
     req<{ ok: boolean; detail: string }>(`/api/tags/${id}`, {

@@ -1,7 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
 const routes = [
-  { path: '/', redirect: '/search' },
+  { path: '/', redirect: '/library/all' },
   { path: '/search', name: 'search', component: () => import('@/views/SearchView.vue') },
   { path: '/favorites', name: 'favorites', component: () => import('@/views/FavoritesView.vue') },
   { path: '/actors', name: 'actors', component: () => import('@/views/ActorsView.vue') },

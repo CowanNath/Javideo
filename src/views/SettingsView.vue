@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { metatube } from '@/api/worker'
+import { metatube, getBaseUrl } from '@/api/worker'
 import { useSettingsStore } from '@/stores/settings'
 import { useLibraryStore } from '@/stores/libraries'
 import LibraryEditDialog from '@/components/LibraryEditDialog.vue'
@@ -16,10 +16,32 @@ const importMsg = ref('')
 const importOk = ref(false)
 
 async function doExport() {
+  const defaultName = `javideo-backup-${new Date().toISOString().slice(0, 10)}.zip`
+
+  // Web version (no Tauri IPC) — the save dialog is unavailable, fall back to
+  // a plain browser download streamed from the worker.
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
+    try {
+      toast(t('exporting'), 'info')
+      const base = await getBaseUrl()
+      const resp = await fetch(`${base}/api/backup/export`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const blob = await resp.blob()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = defaultName
+      a.click()
+      URL.revokeObjectURL(a.href)
+      toast(t('exportDone'), 'success')
+    } catch (e: any) {
+      toast(t('exportFail') + ': ' + e.message, 'error')
+    }
+    return
+  }
+
   try {
     // Use Tauri's save dialog to let the user pick where to save.
     const { save } = await import('@tauri-apps/plugin-dialog')
-    const defaultName = `javideo-backup-${new Date().toISOString().slice(0, 10)}.zip`
     const path = await save({
       defaultPath: defaultName,
       filters: [{ name: 'ZIP', extensions: ['zip'] }],
@@ -30,7 +52,6 @@ async function doExport() {
     if (res.ok) toast(t('exportDone') + ': ' + path, 'success')
     else toast(t('exportFail') + ': ' + (res.detail ?? ''), 'error')
   } catch (e: any) {
-    // Fallback: not in Tauri (browser dev) — use the old download approach.
     toast(t('exportFail') + ': ' + e.message, 'error')
   }
 }
@@ -71,7 +92,7 @@ const mtAddr = ref(''), mtTimeout = ref(15000), playerPath = ref(''), theme = re
 onMounted(async () => {
   await s.load()
   mtAddr.value = s.get('metatube.address', '')
-  mtTimeout.value = Number(s.get('metatube.timeoutMs', '15000'))
+  mtTimeout.value = Number(s.get('metatube.timeoutMs', '15000')) || 15000
   playerPath.value = s.get('player.path', '')
   theme.value = (getStoredTheme()) as Theme
   lang.value = (s.get('ui.language', 'zh') as Lang) || 'zh'
@@ -87,53 +108,70 @@ onMounted(async () => {
 })
 
 function flash(msg: string) { toast(msg, 'success') }
-async function saveMetatube() {
-  await s.set('metatube.address', mtAddr.value)
-  await s.set('metatube.timeoutMs', String(mtTimeout.value))
-  flash(t('metatubeSaved'))
+// Shared save wrapper: settings writes should report failure via toast instead
+// of surfacing as the global startup-error overlay.
+async function saveSetting(key: string, value: string, okMsg = t('saved')) {
+  try {
+    await s.set(key, value)
+    flash(okMsg)
+  } catch (e: any) {
+    toast(t('saveFail') + ': ' + e.message, 'error')
+  }
 }
-async function savePlayer() { await s.set('player.path', playerPath.value); flash(t('playerSaved')) }
+async function saveMetatube() {
+  try {
+    await s.set('metatube.address', mtAddr.value)
+    await s.set('metatube.timeoutMs', String(mtTimeout.value || 15000))
+    flash(t('metatubeSaved'))
+  } catch (e: any) {
+    toast(t('saveFail') + ': ' + e.message, 'error')
+  }
+}
+async function savePlayer() { await saveSetting('player.path', playerPath.value, t('playerSaved')) }
 async function changeTheme(th: Theme) {
   theme.value = th
   applyTheme(th)
-  await s.set('ui.theme', th)
-  flash(t('saved'))
+  await saveSetting('ui.theme', th)
 }
 async function changeLanguage(l: Lang) {
   lang.value = l
   setLang(l)
-  await s.set('ui.language', l)
-  flash(t('saved'))
-  // Immediate reload so ALL pages re-render in the new language.
-  location.reload()
+  try {
+    await s.set('ui.language', l)
+    flash(t('saved'))
+    // Immediate reload so ALL pages re-render in the new language.
+    location.reload()
+  } catch (e: any) {
+    toast(t('saveFail') + ': ' + e.message, 'error')
+  }
 }
 async function toggleScrapeTrailer(on: boolean) {
   scrapeTrailer.value = on
-  await s.set('ui.scrapeTrailer', on ? 'true' : 'false')
-  flash(on ? t('trailerOn') : t('trailerOff'))
+  await saveSetting('ui.scrapeTrailer', on ? 'true' : 'false', on ? t('trailerOn') : t('trailerOff'))
 }
 async function saveProxy() {
-  await s.set('network.proxy', proxyAddr.value.trim())
-  await s.set('network.proxyUser', proxyUser.value.trim())
-  await s.set('network.proxyPass', proxyPass.value)
-  flash(t('proxySaved'))
+  try {
+    await s.set('network.proxy', proxyAddr.value.trim())
+    await s.set('network.proxyUser', proxyUser.value.trim())
+    await s.set('network.proxyPass', proxyPass.value)
+    flash(t('proxySaved'))
+  } catch (e: any) {
+    toast(t('saveFail') + ': ' + e.message, 'error')
+  }
 }
 async function toggleDebug(on: boolean) {
   debugMode.value = on
-  await s.set('ui.debug', on ? 'true' : 'false')
+  await saveSetting('ui.debug', on ? 'true' : 'false', on ? t('debugOn') : t('debugOff'))
   if (on) { try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_devtools') } catch {} }
-  flash(on ? t('debugOn') : t('debugOff'))
 }
 async function changeCloseBehavior(v: 'quit' | 'tray') {
   closeBehavior.value = v
-  await s.set('ui.closeBehavior', v)
+  await saveSetting('ui.closeBehavior', v)
   try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('set_close_behavior', { behavior: v }) } catch {}
-  flash(t('saved'))
 }
 async function changeDefaultSort(v: 'date' | 'name') {
   defaultSort.value = v
-  await s.set('ui.defaultSort', v)
-  flash(t('saved'))
+  await saveSetting('ui.defaultSort', v)
 }
 async function testConn() {
   testing.value = true
@@ -141,14 +179,20 @@ async function testConn() {
     await saveMetatube()
     const r = await metatube.test()
     testResult.value = `${r.ok ? '✅' : '❌'} ${r.detail}`
+  } catch (e: any) {
+    testResult.value = `❌ ${e.message}`
   } finally { testing.value = false }
 }
 
 function openCreate() { editingLib.value = null; dialogOpen.value = true }
 function openEdit(lib: any) { editingLib.value = lib; dialogOpen.value = true }
 async function onSave(lib: any) {
-  if (editingLib.value) await libs.update(editingLib.value.id, lib)
-  else await libs.create(lib)
+  try {
+    if (editingLib.value) await libs.update(editingLib.value.id, lib)
+    else await libs.create(lib)
+  } catch (e: any) {
+    toast(t('saveFail') + ': ' + e.message, 'error')
+  }
 }
 async function onDelete(id: number) {
   if (await confirmDialog(t('deleteLibConfirm'), t('deleteLib'))) await libs.remove(id)
@@ -163,9 +207,9 @@ async function onDelete(id: number) {
     </div>
 
     <!-- 媒体库 -->
-    <SettingSection :title="t('libraries')" :desc="t('newLib')">
+    <SettingSection :title="t('libraries')">
       <template #actions>
-        <button class="btn-primary" @click="openCreate"><span class="i-carbon-add" /> {{ t('newLib') }}</button>
+        <button class="btn-accent" @click="openCreate"><span class="i-carbon-add" /> {{ t('newLib') }}</button>
       </template>
       <div v-for="lib in libs.items" :key="lib.id" class="flex items-center justify-between py-2.5 border-b border-border last:border-0 last:pb-0 first:pt-0">
         <div class="flex items-center gap-3 min-w-0">
@@ -200,7 +244,7 @@ async function onDelete(id: number) {
         <button class="btn" :disabled="testing" @click="testConn">
           <span class="i-carbon-connection-signal" /> {{ testing ? t('testing') : t('testConn') }}
         </button>
-        <button class="btn-primary" @click="saveMetatube"><span class="i-carbon-save" /> {{ t('save') }}</button>
+        <button class="btn-accent" @click="saveMetatube"><span class="i-carbon-save" /> {{ t('save') }}</button>
       </div>
     </SettingSection>
 
@@ -224,7 +268,7 @@ async function onDelete(id: number) {
       </div>
       <label class="flex items-center justify-between py-1.5 cursor-pointer">
         <span class="text-[13px] text-text-soft font-medium">{{ t('scrapeTrailer') }}<br><span class="text-[11px] text-muted font-normal">{{ t('scrapeTrailerHint') }}</span></span>
-        <input type="checkbox" :checked="scrapeTrailer" class="w-4 h-4 accent-[var(--primary)]" @change="toggleScrapeTrailer(($event.target as HTMLInputElement).checked)" />
+        <input type="checkbox" :checked="scrapeTrailer" class="w-4 h-4 accent-[var(--accent)]" @change="toggleScrapeTrailer(($event.target as HTMLInputElement).checked)" />
       </label>
       <label class="flex items-center justify-between py-1.5">
         <span class="text-[13px] text-text-soft font-medium">{{ t('closeBehavior') }}</span>
@@ -235,7 +279,7 @@ async function onDelete(id: number) {
       </label>
       <label class="flex items-center justify-between py-1.5 cursor-pointer">
         <span class="text-[13px] text-text-soft font-medium">{{ t('debugMode') }}</span>
-        <input type="checkbox" :checked="debugMode" class="w-4 h-4 accent-[var(--primary)]" @change="toggleDebug(($event.target as HTMLInputElement).checked)" />
+        <input type="checkbox" :checked="debugMode" class="w-4 h-4 accent-[var(--accent)]" @change="toggleDebug(($event.target as HTMLInputElement).checked)" />
       </label>
     </SettingSection>
 
@@ -243,10 +287,10 @@ async function onDelete(id: number) {
     <SettingSection :title="t('player')" :desc="t('playerDesc')">
       <label class="flex flex-col gap-1.5 mb-3">
         <span class="text-[13px] text-text-soft font-medium">{{ t('playerPath') }}</span>
-        <input v-model="playerPath" class="input" placeholder="例如:C:\Program Files\mpv\mpv.exe" />
+        <input v-model="playerPath" class="input" :placeholder="t('playerPathPlaceholder')" />
       </label>
       <div class="flex justify-end">
-        <button class="btn-primary" @click="savePlayer"><span class="i-carbon-save" /> {{ t('save') }}</button>
+        <button class="btn-accent" @click="savePlayer"><span class="i-carbon-save" /> {{ t('save') }}</button>
       </div>
     </SettingSection>
 
@@ -267,7 +311,7 @@ async function onDelete(id: number) {
         </label>
       </div>
       <div class="flex justify-end">
-        <button class="btn-primary" @click="saveProxy"><span class="i-carbon-save" /> {{ t('save') }}</button>
+        <button class="btn-accent" @click="saveProxy"><span class="i-carbon-save" /> {{ t('save') }}</button>
       </div>
     </SettingSection>
 
@@ -282,8 +326,8 @@ async function onDelete(id: number) {
     <!-- 导入导出 -->
     <SettingSection :title="t('importExport')" :desc="t('importExportDesc')">
       <div class="flex gap-2">
-        <button class="btn" @click="doExport"><span class="i-carbon-export" /> {{ t('exportData') }}</button>
-        <button class="btn" @click="triggerImport"><span class="i-carbon-import" /> {{ t('importData') }}</button>
+        <button class="btn-outline-accent" @click="doExport"><span class="i-carbon-export" /> {{ t('exportData') }}</button>
+        <button class="btn-outline-accent" @click="triggerImport"><span class="i-carbon-document-import" /> {{ t('importData') }}</button>
         <input ref="importInput" type="file" accept=".zip" class="hidden" @change="doImport" />
       </div>
       <p v-if="importMsg" class="text-[12px] mt-2" :class="importOk ? 'text-status-green' : 'text-red-400'">{{ importMsg }}</p>

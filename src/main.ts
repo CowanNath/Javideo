@@ -9,10 +9,8 @@ import { initLang } from './utils/i18n'
 initTheme()
 initLang()
 import './styles.css'
+import './box-theme.css'
 import 'virtual:uno.css'
-
-// Apply theme before mount to avoid a flash of the wrong colors.
-initTheme()
 
 // Surface any error that happens during/after mount onto the page, so a blank
 // screen always shows *something* diagnostic instead of nothing.

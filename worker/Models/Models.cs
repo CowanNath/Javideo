@@ -7,6 +7,9 @@ public class Library
     public string MetadataSource { get; set; } = "metatube";
     public List<string> Directories { get; set; } = new();
     public long MovieCount { get; set; }
+    /// <summary>Cloud-drive library: nfo/posters/trailers are cached locally,
+    /// the cloud is only touched when playing a video.</summary>
+    public bool CacheLocal { get; set; }
 }
 
 public class Movie
@@ -29,11 +32,16 @@ public class Movie
     public string? Provider { get; set; }
     public string? HomepageUrl { get; set; }
     public string? FolderPath { get; set; }
+    /// <summary>Cloud-drive library (cache_local): the video's real location —
+    /// it never moves into FolderPath. Null for plain local libraries.</summary>
+    public string? SourcePath { get; set; }
     public List<Actor> Actors { get; set; } = new();
     public List<Tag> Tags { get; set; } = new();
     public List<MagnetResult> Magnets { get; set; } = new();
     public List<string> PreviewImages { get; set; } = new();
     public bool HasTrailer { get; set; }
+    /// <summary>A playable (non-trailer) video file exists in FolderPath.</summary>
+    public bool HasVideo { get; set; }
 }
 
 public class Actor

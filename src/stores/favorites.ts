@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { favorites as api } from '@/api/worker'
 import type { FavoriteTarget } from '@/types'
+import { toast } from '@/utils/toast'
+import { t } from '@/utils/i18n'
 
 // Holds the favorited target IDs per type as reactive arrays. Reads of
 // `.includes(id)` inside templates/computeds ARE tracked, so the heart flips
@@ -13,6 +15,7 @@ export const useFavoritesStore = defineStore('favorites', () => {
   // Use a plain object of loading promises to de-duplicate concurrent loads
   // (NOT a reactive Set — Set mutation isn't tracked by Vue).
   const loading: Partial<Record<FavoriteTarget, Promise<void>>> = {}
+  const loaded = new Set<FavoriteTarget>()
 
   function list(type: FavoriteTarget): number[] {
     return type === 'movie' ? movieIds.value : type === 'tag' ? tagIds.value : actorIds.value
@@ -25,13 +28,17 @@ export const useFavoritesStore = defineStore('favorites', () => {
 
   // Force a fresh fetch (used by views on mount).
   async function load(type: FavoriteTarget) {
-    try { setList(type, await api.ids(type)) } catch { /* ignore */ }
+    try {
+      setList(type, await api.ids(type))
+      loaded.add(type)
+    } catch { /* ignore; allow the next ensureLoaded call to retry */ }
   }
 
   // Idempotent: the first caller triggers the fetch, concurrent callers share
   // the same promise, later callers no-op (data already present).
   async function ensureLoaded(type: FavoriteTarget) {
     if (loading[type]) return loading[type]
+    if (loaded.has(type)) return
     const p = load(type).finally(() => { delete loading[type] })
     loading[type] = p
     return p
@@ -51,8 +58,10 @@ export const useFavoritesStore = defineStore('favorites', () => {
       else await api.remove(type, id)
       return willAdd
     } catch {
-      // Roll back on failure.
+      // Roll back on failure — and say so, a silently-flipping heart is worse
+      // than no feedback at all.
       setList(type, fav ? [...list(type), id] : list(type).filter((x) => x !== id))
+      toast(t('favFail'), 'error')
       return fav
     }
   }

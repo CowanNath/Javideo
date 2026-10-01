@@ -1,6 +1,6 @@
 {
   "name": "javideo",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,6 +19,7 @@
     "vue-router": "^4.4.5"
   },
   "devDependencies": {
+    "@iconify-json/carbon": "^1.2.27",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/cli": "^2.1.0",
     "@types/node": "^26.0.1",

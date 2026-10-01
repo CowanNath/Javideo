@@ -6,7 +6,9 @@ import type { Movie, Tag } from '@/types'
 import { useFavoritesStore } from '@/stores/favorites'
 import MovieCard from '@/components/MovieCard.vue'
 import MovieDetailDrawer from '@/components/MovieDetailDrawer.vue'
+import { useMovieDetail } from '@/utils/movieDetail'
 import { t } from '@/utils/i18n'
+import { toast } from '@/utils/toast'
 
 const route = useRoute()
 const router = useRouter()
@@ -14,8 +16,7 @@ const favs = useFavoritesStore()
 const tag = ref<Tag | null>(null)
 const movies = ref<Movie[]>([])
 const loading = ref(false)
-const drawerId = ref<number | null>(null)
-const drawerOpen = ref(false)
+const { drawerId, drawerOpen, openDetail } = useMovieDetail()
 
 async function load() {
   loading.value = true
@@ -23,13 +24,14 @@ async function load() {
     const id = Number(route.params.id)
     const [info, ms] = await Promise.all([tags.info(id), tags.movies(id)])
     tag.value = info
-    movies.value = ms
+    movies.value = ms ?? []
     await favs.load('tag')
+  } catch (e: any) {
+    toast(t('loadFailed') + ': ' + e.message, 'error')
   } finally {
     loading.value = false
   }
 }
-function openDetail(m: Movie) { drawerId.value = m.id ?? null; drawerOpen.value = true }
 const tagId = () => Number(route.params.id)
 const isTagFav = computed(() => favs.tagIds.includes(tagId()))
 onMounted(() => { favs.ensureLoaded('tag'); load() })
@@ -65,7 +67,7 @@ watch(() => route.params.id, load)
       <span class="i-carbon-video block text-4xl mb-3 opacity-50" />
       {{ t('noTagMovies') }}
     </div>
-    <div v-else class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));">
+    <div v-else class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));">
       <MovieCard v-for="m in movies" :key="m.id" :movie="m" @click="openDetail(m)" />
     </div>
 

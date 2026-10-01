@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { MagnetSourceResult, MagnetResult } from '@/types'
+import { t } from '@/utils/i18n'
 
 const props = defineProps<{
   grouped: MagnetSourceResult[]   // per-source results
@@ -10,17 +11,18 @@ const props = defineProps<{
 // Active source tab.
 const activeSource = ref('')
 const sources = computed(() => props.grouped.map((g) => g.source))
-// Pick the first available source by default.
+// Keep the tab selection valid when results arrive or change shape —
+// as a watch (not inside the computed, which must stay side-effect-free).
 function ensureTab() {
   if (!activeSource.value && sources.value.length) activeSource.value = sources.value[0]
   if (activeSource.value && !sources.value.includes(activeSource.value)) {
     activeSource.value = sources.value[0] ?? ''
   }
 }
-const current = computed<MagnetSourceResult | undefined>(() => {
-  ensureTab()
-  return props.grouped.find((g) => g.source === activeSource.value)
-})
+watch(sources, ensureTab, { immediate: true })
+const current = computed<MagnetSourceResult | undefined>(() =>
+  props.grouped.find((g) => g.source === activeSource.value)
+)
 
 // Total across sources (for the header count).
 const totalCount = computed(() => props.grouped.reduce((n, g) => n + g.count, 0))
@@ -56,7 +58,7 @@ async function copy(m: MagnetResult) {
     <template v-else-if="!grouped.length">
       <div class="card !rounded-md p-8 text-center text-muted text-sm">
         <span class="i-carbon-search block text-3xl mb-2 opacity-50" />
-        未找到磁力链接
+        {{ t('noMagnetResults') }}
       </div>
     </template>
 
@@ -76,7 +78,7 @@ async function copy(m: MagnetResult) {
             :class="activeSource === g.source ? 'bg-primary-soft text-primary' : 'bg-surface3 text-muted'"
           >{{ g.count }}</span>
         </button>
-        <span class="px-2 text-[11px] text-muted">共 {{ totalCount }} 条</span>
+        <span class="px-2 text-[11px] text-muted">{{ t('totalItems', { n: totalCount }) }}</span>
       </div>
 
       <!-- Results for the active source -->
@@ -100,16 +102,17 @@ async function copy(m: MagnetResult) {
           </div>
           <button
             class="btn-ghost !text-primary shrink-0"
-            :title="copied === m.magnetUri ? '已复制!' : '复制磁力链接'"
+            :title="copied === m.magnetUri ? t('copied') : t('copyMagnet')"
+            :aria-label="copied === m.magnetUri ? t('copied') : t('copyMagnet')"
             @click="copy(m)"
           >
             <span :class="copied === m.magnetUri ? 'i-carbon-checkmark-filled' : 'i-carbon-copy'" />
-            {{ copied === m.magnetUri ? '已复制' : '复制' }}
+            {{ copied === m.magnetUri ? t('copied') : t('copy') }}
           </button>
         </div>
       </div>
       <div v-else class="card !rounded-md p-8 text-center text-muted text-sm">
-        该搜索源暂无结果
+        {{ t('sourceEmpty') }}
       </div>
     </template>
   </div>

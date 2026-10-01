@@ -12,6 +12,10 @@ public static class DbInitializer
         await using var conn = factory.Create();
         await conn.OpenAsync();
 
+        // WAL: concurrent readers (image/grid requests) no longer block on the
+        // writer and vice versa. journal_mode is persistent for the db file.
+        await conn.ExecuteAsync("PRAGMA journal_mode=WAL;");
+
         // Libraries: a user-defined media library (name + metadata source + directories).
         await conn.ExecuteAsync("""
             CREATE TABLE IF NOT EXISTS libraries (
@@ -62,6 +66,13 @@ public static class DbInitializer
         await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS idx_movies_library ON movies(library_id);");
         await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS idx_movies_number ON movies(number);");
         try { await conn.ExecuteAsync("ALTER TABLE movies ADD COLUMN preview_images TEXT;"); } catch { }
+        // Cached Thunder GCID content hash (computed once per video file).
+        try { await conn.ExecuteAsync("ALTER TABLE movies ADD COLUMN gcid TEXT;"); } catch { }
+        // Cloud-drive library option: metadata cached locally, video stays remote.
+        try { await conn.ExecuteAsync("ALTER TABLE libraries ADD COLUMN cache_local INTEGER NOT NULL DEFAULT 0;"); } catch { }
+        // Where the video file actually lives (set for cache_local libraries —
+        // the video stays on the cloud drive while metadata is cached locally).
+        try { await conn.ExecuteAsync("ALTER TABLE movies ADD COLUMN source_path TEXT;"); } catch { }
 
         // Actors.
         await conn.ExecuteAsync("""
@@ -77,11 +88,17 @@ public static class DbInitializer
             CREATE TABLE IF NOT EXISTS movie_actors (
                 movie_id INTEGER NOT NULL,
                 actor_id INTEGER NOT NULL,
+                manual   INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (movie_id, actor_id),
                 FOREIGN KEY (movie_id) REFERENCES movies(id) ON DELETE CASCADE,
                 FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE CASCADE
             );
         """);
+
+        // manual=1 → the actor link was added/kept by the user; rescrape only
+        // rebuilds the non-manual (MetaTube) links.
+        // Existing databases also need the column; run this after table creation.
+        try { await conn.ExecuteAsync("ALTER TABLE movie_actors ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;"); } catch { }
 
         // Tags. category: genre | series | maker | custom.
         // is_standard: 1 for standard-library tag, 0 for non-standard (custom) library.

@@ -3,9 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Dark is the default theme; paint the background before CSS arrives to
+         avoid a white flash on startup. -->
+    <meta name="color-scheme" content="dark light" />
     <title>Javideo</title>
   </head>
   <body>
+    <script>
+      // Paint the startup background before CSS loads so there is no white
+      // flash. In Tauri the window is truly transparent (decorations off) —
+      // never paint an opaque color there, the gradient frame must show the
+      // real desktop through. Browser dev has no desktop behind it, so paint
+      // a backdrop simulating the transparency.
+      if (!('__TAURI_INTERNALS__' in window)) {
+        document.documentElement.style.background =
+          localStorage.getItem('javideo.theme') === 'light' ? '#f4f4f5' : '#24252d'
+      }
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

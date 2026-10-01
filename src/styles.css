@@ -26,30 +26,50 @@ button {
 }
 
 /* ============================================================
-   Modern Dark Mode design tokens (Spotify/Discord-style).
+   Design tokens — C-Box style: near-black glass surfaces over a
+   separated panel, gold brand accent (nav highlight, badges,
+   primary CTA gradient). Radii follow the box look (12/16).
    Dark is the default per the design system.
    ============================================================ */
 :root,
 :root[data-theme='dark'] {
-  /* Backgrounds — modern near-black with a cool zinc tint (not pure #000 or blue). */
-  --bg: #0f1011;
-  --bg-gradient: radial-gradient(1000px 500px at 85% -10%, #16181d 0%, transparent 60%);
-  --sidebar: #0c0d0e;
-  --surface: #18191b;
-  --surface-2: #202226;
-  --surface-3: #2a2d33;
+  /* Tell the WebView to render native controls (select dropdown, checkbox,
+     scrollbars) dark too — without this they render light-themed. */
+  color-scheme: dark;
+  /* Scrollbar thumb color, theme-aware (white alpha is invisible on light bg). */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
+  /* Focus ring color for keyboard navigation. */
+  --focus-ring: rgba(239, 203, 117, 0.5);
+  /* Backgrounds — near-black panel; the box chrome lives in box-theme.css. */
+  --bg: #101113;
+  --bg-gradient: none;
+  /* Sidebar surface (dark glass on the rounded rail). */
+  --sidebar: #090a0c;
+  /* Surfaces — opaque overlays, with scoped glass for cards on the panel. */
+  /* Popovers and teleported dialogs need an opaque surface.
+     The glass treatment for in-panel cards is scoped in box-theme.css. */
+  --surface: #17181a;
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --surface-3: rgba(255, 255, 255, 0.09);
   /* Borders — single-pixel, low-contrast so dark cards don't melt into bg. */
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
-  /* Accent — soft blue-gray for selection, light blue for active text. */
-  --primary: #3b82f6;
-  --primary-hover: #2563eb;
-  --primary-soft: rgba(59, 130, 246, 0.15);
-  --status-green: #10b981;
+  /* Gold — active nav, hover ring, primary CTA gradient. */
+  --primary: #efcb75;
+  --primary-hover: #ffdf99;
+  --primary-soft: rgba(239, 203, 117, 0.13);
+  /* Brand gold — rating badges, toggles, logo, secondary CTAs. */
+  --accent: #efcb75;
+  --accent-hover: #ffdf99;
+  --accent-soft: rgba(239, 203, 117, 0.12);
+  --on-accent: #242015;
+  --status-green: #34d399;
+  --danger: #e5484d;
   /* Typography. */
-  --text: #f3f4f6;
-  --text-soft: #9ca3af;
-  --muted: #6b7280;
+  --text: #f5f2ed;
+  --text-soft: #b1b1b5;
+  --muted: #83848c;
   /* Shadows + radii. */
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
@@ -59,20 +79,30 @@ button {
   --radius-lg: 16px;
 }
 
-/* Light variant (still available via settings). */
+/* Light variant (still available via settings) — same gold accent,
+   solid surfaces, box radii. */
 :root[data-theme='light'] {
-  --bg: #f7f8fa;
-  --bg-gradient: radial-gradient(1000px 500px at 85% -10%, #eef2ff 0%, transparent 60%);
-  --sidebar: #ffffff;
+  color-scheme: light;
+  --scrollbar-thumb: rgba(20, 30, 60, 0.18);
+  --scrollbar-thumb-hover: rgba(20, 30, 60, 0.32);
+  --focus-ring: rgba(185, 150, 70, 0.45);
+  --bg: #f4f4f5;
+  --bg-gradient: none;
+  --sidebar: #f7f7f8;
   --surface: #ffffff;
-  --surface-2: #f1f3f7;
-  --surface-3: #e5e9f0;
+  --surface-2: #f1f2f4;
+  --surface-3: #e4e6ea;
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.14);
-  --primary: #3b82f6;
-  --primary-hover: #2563eb;
-  --primary-soft: rgba(59, 130, 246, 0.10);
+  --primary: #c9a557;
+  --primary-hover: #b8934a;
+  --primary-soft: rgba(201, 165, 87, 0.12);
+  --accent: #c9a557;
+  --accent-hover: #b8934a;
+  --accent-soft: rgba(201, 165, 87, 0.14);
+  --on-accent: #241d0e;
   --status-green: #10b981;
+  --danger: #e5484d;
   --text: #1a1d24;
   --text-soft: #4a5160;
   --muted: #8a92a3;
@@ -94,10 +124,26 @@ body::before {
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); background-clip: padding-box; border: 2px solid transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); background-clip: padding-box; border: 2px solid transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
 a { color: inherit; text-decoration: none; }
+
+/* Keyboard focus ring — consistent across all custom-styled controls. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect reduced-motion preference: kill decorative animation. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 main { animation: fadeIn 0.25s ease; }
 @keyframes fadeIn {
@@ -113,6 +159,14 @@ select.input {
   background-position: right 10px center;
   padding-right: 32px;
   cursor: pointer;
+}
+
+/* Native option popups cannot composite the translucent input background.
+   Give their text and surface explicit, opaque theme colors. */
+select.input option,
+select.input optgroup {
+  background-color: var(--surface);
+  color: var(--text);
 }
 
 /* Line clamp helpers. */

@@ -4,6 +4,7 @@ export interface Library {
   metadataSource: string
   directories: string[]
   movieCount?: number
+  cacheLocal?: boolean
 }
 
 export interface Actor {
@@ -83,9 +84,21 @@ export interface Movie {
   magnets?: MagnetResult[]
   previewImages?: string[]
   hasTrailer?: boolean
+  hasVideo?: boolean
 }
 
 export type FavoriteTarget = 'movie' | 'tag' | 'actor'
+
+export interface SubtitleItem {
+  url: string
+  ext: string
+  name: string
+  score: number
+  languages: string
+  durationMs?: number
+  durationDiffSec?: number | null
+  gcidHit?: boolean
+}
 
 export interface Favorite {
   id: number
@@ -94,6 +107,8 @@ export interface Favorite {
   name?: string | null
   subtitle?: string | null
   cover?: string | null
+  hasVideo?: boolean | null
+  hasTrailer?: boolean | null
 }
 
 export interface IngestResult {

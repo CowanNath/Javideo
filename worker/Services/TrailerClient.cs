@@ -91,19 +91,18 @@ public sealed class TrailerClient
     }
 
     /// <summary>Find an existing temp trailer matching the fanHao case-insensitively,
-    /// so ingest can find the file even if MetaTube returned a differently-cased number.</summary>
+    /// so ingest can find the file even if MetaTube returned a differently-cased number.
+    /// No "only one file → use it" fallback: after searching 番号 B and ingesting
+    /// 番号 A, that fallback renamed B's trailer to A-trailer.mp4.</summary>
     public static string? FindExistingTemp(string fanHao)
     {
         if (!Directory.Exists(TempDir)) return null;
         var target = fanHao.ToUpperInvariant();
-        var files = Directory.GetFiles(TempDir, "*.mp4");
-        foreach (var f in files)
+        foreach (var f in Directory.GetFiles(TempDir, "*.mp4"))
         {
             if (Path.GetFileNameWithoutExtension(f).Equals(target, StringComparison.OrdinalIgnoreCase))
                 return f;
         }
-        // Fallback: if only one temp file exists, use it (common case — just searched one number).
-        if (files.Length == 1) return files[0];
         return null;
     }
 

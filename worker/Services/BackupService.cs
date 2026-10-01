@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using Javideo.Worker.Db;
+using Microsoft.Data.Sqlite;
 
 namespace Javideo.Worker.Services;
 
@@ -17,16 +18,32 @@ public sealed class BackupService
     /// The caller (endpoint) streams it to the client and deletes the temp.</summary>
     public string Export()
     {
-        var tempZip = Path.Combine(Path.GetTempPath(), $"javideo-backup-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
-        if (File.Exists(tempZip)) File.Delete(tempZip);
+        // Unique name — two exports in the same second must not fight over the
+        // same file while one of them is still being streamed.
+        var tempZip = Path.Combine(Path.GetTempPath(), $"javideo-backup-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.zip");
 
         using var archive = ZipFile.Open(tempZip, ZipArchiveMode.Create);
 
-        // 1. SQLite database — copy first since the live file is locked by the
-        //    worker process itself (SQLite holds an exclusive write lock).
+        // 1. SQLite database — snapshot it via VACUUM INTO, which produces a
+        //    consistent copy even while other endpoints are writing (a plain
+        //    File.Copy of a live db can tear mid-transaction).
         var tempDb = Path.Combine(Path.GetTempPath(), $"javideo-db-{Guid.NewGuid():N}.db");
-        File.Copy(_db.DbPath, tempDb, overwrite: true);
-        archive.CreateEntryFromFile(tempDb, "library.db");
+        try
+        {
+            using (var snap = new SqliteConnection($"Data Source={_db.DbPath}"))
+            {
+                snap.Open();
+                using var cmd = snap.CreateCommand();
+                cmd.CommandText = "VACUUM INTO @p";
+                cmd.Parameters.AddWithValue("@p", tempDb);
+                cmd.ExecuteNonQuery();
+            }
+            archive.CreateEntryFromFile(tempDb, "library.db");
+        }
+        finally
+        {
+            try { File.Delete(tempDb); } catch { }
+        }
 
         // 2. Cached actor avatars.
         AddDirectory(archive, _db.AvatarsDir, "actors/");
@@ -36,9 +53,6 @@ public sealed class BackupService
         AddDirectory(archive, previewsDir, "previews/");
 
         // 4. Settings are inside library.db, no separate file needed.
-
-        // Clean up the temp db copy (zip already read it).
-        try { File.Delete(tempDb); } catch { }
 
         return tempZip;
     }
@@ -57,12 +71,19 @@ public sealed class BackupService
         {
             ZipFile.ExtractToDirectory(zipPath, staging, overwriteFiles: true);
 
-            // Validate: must contain library.db.
-            if (!File.Exists(Path.Combine(staging, "library.db")))
-                throw new InvalidDataException("备份文件无效:缺少 library.db");
-
-            // Move library.db.
+            // Validate: must contain a real SQLite database.
             var srcDb = Path.Combine(staging, "library.db");
+            if (!File.Exists(srcDb))
+                throw new InvalidDataException("备份文件无效:缺少 library.db");
+            if (!IsSqliteFile(srcDb))
+                throw new InvalidDataException("备份文件无效:library.db 不是有效的 SQLite 数据库");
+
+            // Close pooled connections so no open handle corrupts the copy,
+            // and keep a one-shot backup of the current db — import overwrites
+            // everything, this is the only way back.
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(_db.DbPath))
+                File.Copy(_db.DbPath, _db.DbPath + ".bak", overwrite: true);
             File.Copy(srcDb, _db.DbPath, overwrite: true);
 
             // Move actors/ and previews/ directories.
@@ -76,6 +97,19 @@ public sealed class BackupService
     }
 
     // --- helpers ---
+
+    /// <summary>SQLite files start with the 16-byte magic header.</summary>
+    private static bool IsSqliteFile(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            Span<byte> header = stackalloc byte[16];
+            if (fs.Read(header) < header.Length) return false;
+            return "SQLite format 3\0"u8.SequenceEqual(header);
+        }
+        catch { return false; }
+    }
 
     private static void AddIfExists(ZipArchive archive, string filePath, string entryName)
     {

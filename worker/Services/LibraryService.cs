@@ -18,6 +18,7 @@ public sealed class LibraryService
         await c.OpenAsync();
         var libs = (await c.QueryAsync<Library>(@"
             SELECT l.id Id, l.name Name, l.metadata_source MetadataSource,
+                   l.cache_local CacheLocal,
                    (SELECT COUNT(*) FROM movies m WHERE m.library_id=l.id) MovieCount
             FROM libraries l ORDER BY l.id")).ToList();
 
@@ -32,7 +33,7 @@ public sealed class LibraryService
         await using var c = _db.Create();
         await c.OpenAsync();
         var lib = await c.QueryFirstOrDefaultAsync<Library>(@"
-            SELECT l.id Id, l.name Name, l.metadata_source MetadataSource
+            SELECT l.id Id, l.name Name, l.metadata_source MetadataSource, l.cache_local CacheLocal
             FROM libraries l WHERE l.id=@id", new { id });
         if (lib == null) return null;
         lib.Directories = (await c.QueryAsync<string>(
@@ -45,9 +46,9 @@ public sealed class LibraryService
         await using var c = _db.Create();
         await c.OpenAsync();
         var id = await c.ExecuteScalarAsync<long>(@"
-            INSERT INTO libraries(name, metadata_source) VALUES (@name, @src);
+            INSERT INTO libraries(name, metadata_source, cache_local) VALUES (@name, @src, @cacheLocal);
             SELECT last_insert_rowid();",
-            new { name = lib.Name, src = string.IsNullOrWhiteSpace(lib.MetadataSource) ? "metatube" : lib.MetadataSource });
+            new { name = lib.Name, src = string.IsNullOrWhiteSpace(lib.MetadataSource) ? "metatube" : lib.MetadataSource, cacheLocal = lib.CacheLocal });
 
         foreach (var d in lib.Directories)
         {
@@ -64,8 +65,8 @@ public sealed class LibraryService
         await using var c = _db.Create();
         await c.OpenAsync();
         await c.ExecuteAsync(
-            "UPDATE libraries SET name=@name, metadata_source=@src WHERE id=@id",
-            new { name = lib.Name, src = lib.MetadataSource, id });
+            "UPDATE libraries SET name=@name, metadata_source=@src, cache_local=@cacheLocal WHERE id=@id",
+            new { name = lib.Name, src = lib.MetadataSource, cacheLocal = lib.CacheLocal, id });
         await c.ExecuteAsync("DELETE FROM library_directories WHERE library_id=@id", new { id });
         foreach (var d in lib.Directories)
         {
@@ -89,5 +90,18 @@ public sealed class LibraryService
         var lib = await GetAsync(libraryId);
         if (lib == null) return null;
         return lib.Directories.FirstOrDefault(Directory.Exists);
+    }
+}
+
+public static class LibraryServiceExtensions
+{
+    /// <summary>Whether the library is a cloud-drive library whose metadata is
+    /// cached locally (videos stay on the remote drive).</summary>
+    public static async Task<bool> IsCacheLocalAsync(this DbConnectionFactory db, long libraryId)
+    {
+        await using var c = db.Create();
+        await c.OpenAsync();
+        return await c.ExecuteScalarAsync<long?>(
+            "SELECT cache_local FROM libraries WHERE id=@id", new { id = libraryId }) == 1;
     }
 }

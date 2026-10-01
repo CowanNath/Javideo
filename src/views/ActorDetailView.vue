@@ -7,6 +7,7 @@ import { useFavoritesStore } from '@/stores/favorites'
 import { t } from '@/utils/i18n'
 import MovieCard from '@/components/MovieCard.vue'
 import MovieDetailDrawer from '@/components/MovieDetailDrawer.vue'
+import { useMovieDetail } from '@/utils/movieDetail'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,8 +16,7 @@ const actor = ref<ActorDetail | null>(null)
 const movies = ref<Movie[]>([])
 const loading = ref(false)
 const configError = ref('')
-const drawerId = ref<number | null>(null)
-const drawerOpen = ref(false)
+const { drawerId, drawerOpen, openDetail } = useMovieDetail()
 // Image lightbox with prev/next navigation.
 const previewIdx = ref<number | null>(null)
 const previewImg = computed(() =>
@@ -54,12 +54,11 @@ async function load() {
     configError.value = res.configError ?? ''
     if (!actor.value) actor.value = { name: res.name }
   } catch (e: any) {
-    configError.value = '加载失败: ' + e.message
+    configError.value = t('loadFailed') + ': ' + e.message
   } finally {
     loading.value = false
   }
 }
-function openDetail(m: Movie) { drawerId.value = m.id ?? null; drawerOpen.value = true }
 function fmtBirthday(d?: string | null) {
   if (!d) return ''
   return d.startsWith('0001') ? '' : d.slice(0, 10)
@@ -140,7 +139,7 @@ watch(() => route.params.id, load)
           <span class="i-carbon-video block text-4xl mb-3 opacity-50" />
           {{ t('noWorks') }}
         </div>
-        <div v-else class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));">
+        <div v-else class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));">
           <MovieCard v-for="m in movies" :key="m.id" :movie="m" @click="openDetail(m)" />
         </div>
       </section>

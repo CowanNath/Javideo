@@ -38,8 +38,21 @@ public sealed class AvatarService
             if (!Uri.TryCreate(remoteUrl, UriKind.Absolute, out var uri)) return null;
             using var resp = await _http.GetAsync(uri);
             if (!resp.IsSuccessStatusCode) return null;
-            await using var fs = File.Create(local);
-            await resp.Content.CopyToAsync(fs);
+            // Download to a temp name, then move atomically — two concurrent
+            // first-requests for the same actor would otherwise interleave
+            // writes into one truncated/corrupt jpg.
+            var tmp = local + ".tmp";
+            try
+            {
+                await using (var fs = File.Create(tmp))
+                    await resp.Content.CopyToAsync(fs);
+                File.Move(tmp, local, overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(tmp); } catch { }
+                throw;
+            }
             return FilenameFor(actorId);
         }
         catch (Exception ex)

@@ -18,17 +18,37 @@ public abstract class HtmlMagnetSourceBase : IMagnetSource
 {
     public abstract string Name { get; }
 
-    private const string UserAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+    // Firefox UA, not Chrome: btdig's anti-bot CAPTCHAs Chrome-format UAs
+    // (scrapers love impersonating Chrome), while Firefox/curl/generic UAs get
+    // results directly. Verified live 2026-08.
+    protected const string UserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) " +
+        "Gecko/20100101 Firefox/125.0";
+
+    // Used on the 429 retry — the rate-limit is often UA-driven, so a retry
+    // with the same UA is pointless; curl is accepted by btdig.
+    private const string FallbackUserAgent = "curl/8.5.0";
 
     // Each source instance gets its own handler+client so concurrent sources
-    // never share mutable state.
-    private static readonly HttpClientHandler Handler = new()
+    // never share mutable state. Proxy (from settings) is applied per-request
+    // since these sites are typically unreachable without one.
+    protected static HttpClientHandler CreateHandler()
     {
-        // Some magnet sites misbehave; be lenient.
-        ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
-    };
+        var h = new HttpClientHandler
+        {
+            // Some magnet sites misbehave; be lenient.
+            ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
+        };
+        if (!string.IsNullOrWhiteSpace(_proxyAddr) && Uri.TryCreate(_proxyAddr, UriKind.Absolute, out var proxyUri))
+        {
+            var proxy = new System.Net.WebProxy(proxyUri);
+            if (!string.IsNullOrWhiteSpace(_proxyUser))
+                proxy.Credentials = new System.Net.NetworkCredential(_proxyUser, _proxyPass ?? "");
+            h.Proxy = proxy;
+            h.UseProxy = true;
+        }
+        return h;
+    }
 
     // Match the full magnet URI (run against HTML-decoded text so &amp; is &):
     // scheme + btih hash + everything up to the next whitespace/quote/bracket.
@@ -38,38 +58,68 @@ public abstract class HtmlMagnetSourceBase : IMagnetSource
 
     protected HtmlMagnetSourceBase() { }
 
+    /// <summary>Proxy config set by MagnetService before each search (magnet
+    /// sites are typically unreachable without a proxy).</summary>
+    private static string? _proxyAddr, _proxyUser, _proxyPass;
+
+    public static void ConfigureProxy(string? addr, string? user, string? pass)
+    {
+        _proxyAddr = addr;
+        _proxyUser = user;
+        _proxyPass = pass;
+    }
+
     /// <summary>Candidate search URLs to try, in order. First that yields
     /// magnet links wins.</summary>
     protected abstract IEnumerable<string> SearchUrls(string query);
 
-    public async Task<List<MagnetResult>> SearchAsync(string query, CancellationToken ct = default)
+    public virtual async Task<List<MagnetResult>> SearchAsync(string query, CancellationToken ct = default)
     {
         var results = new List<MagnetResult>();
-        using var http = new HttpClient(Handler, disposeHandler: false)
+        var proxyAddr = _proxyAddr;
+
+        using var http = new HttpClient(CreateHandler())
         {
             Timeout = TimeSpan.FromSeconds(20),
         };
         // Cloudflare-protected sites (pollack3.sbs etc.) reject bare requests,
-        // so send a full browser-like header set.
-        http.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
+        // so send a full browser-like header set. UA is set per-request so the
+        // 429 retry can swap to a different one.
         http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9,en;q=0.8");
         http.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
         http.DefaultRequestHeaders.Add("Upgrade-Insecure-Requests", "1");
 
         string? html = null;
+        Serilog.Log.Information("Magnet[{Name}]: proxy={Proxy} searching {Count} urls for {Query}",
+            Name, proxyAddr ?? "(none)", SearchUrls(query).Count(), query);
         foreach (var url in SearchUrls(query))
         {
-            try
+            // 429 = rate-limited — wait and retry once before giving up on this URL.
+            for (int attempt = 1; attempt <= 2; attempt++)
             {
-                using var resp = await http.GetAsync(url, ct);
-                if (!resp.IsSuccessStatusCode) continue;
-                html = await resp.Content.ReadAsStringAsync(ct);
-                if (html.Contains("magnet:?", StringComparison.OrdinalIgnoreCase)) break;
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                    req.Headers.UserAgent.ParseAdd(attempt == 1 ? UserAgent : FallbackUserAgent);
+                    using var resp = await http.SendAsync(req, ct);
+                    Serilog.Log.Information("Magnet[{Name}]: {Url} -> {Status} ({Len}b) attempt {N}",
+                        Name, url, (int)resp.StatusCode, resp.Content.Headers.ContentLength ?? -1, attempt);
+                    if ((int)resp.StatusCode == 429 && attempt == 1)
+                    {
+                        await Task.Delay(3000, ct);
+                        continue;
+                    }
+                    if (!resp.IsSuccessStatusCode) break;
+                    html = await resp.Content.ReadAsStringAsync(ct);
+                    if (html.Contains("magnet:?", StringComparison.OrdinalIgnoreCase)) break;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Warning("Magnet[{Name}]: {Url} -> {Msg}", Name, url, ex.Message);
+                }
             }
-            catch
-            {
-                /* try next url */
-            }
+            if (!string.IsNullOrEmpty(html) && html.Contains("magnet:?", StringComparison.OrdinalIgnoreCase)) break;
         }
         if (string.IsNullOrEmpty(html)) return results;
 
@@ -126,7 +176,7 @@ public abstract class HtmlMagnetSourceBase : IMagnetSource
         for (int depth = 0; depth < 5 && node != null; depth++)
         {
             var t = CleanText(node.InnerText);
-            if (IsLikelyTitle(t))
+            if (t != null && IsLikelyTitle(t))
             {
                 // For sites where the row bundles "Name <size> magnet", strip a
                 // trailing size so the title stays clean.

@@ -16,3 +16,6 @@ worker/obj/
 
 # release deliverables (attached to GitHub releases instead)
 Javideo-app/
+
+# local agent state
+.mimosa/

@@ -1,6 +1,6 @@
 [package]
 name = "javideo"
-version = "0.1.0"
+version = "2.0.0"
 description = "Javideo - 本地番号刮削与媒体库管理"
 authors = ["Javideo"]
 edition = "2021"

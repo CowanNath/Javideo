@@ -1,82 +1,106 @@
-using System.Linq;
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
+using Javideo.Worker.Models;
 
 namespace Javideo.Worker.Magnet;
 
 /// <summary>
-/// Magnet search via yhg007.com. The observed search URL pattern is:
-///   https://yhg007.com/search-{query}-0-0-1.html
+/// Magnet search via yhg007.com. The site redesigned: search results no longer
+/// contain magnet links directly — each row links to /hash/{infohash}.html.
+/// We extract the 40-char infohash from those links and build
+/// magnet:?xt=urn:btih:{hash} ourselves (no need to fetch each detail page).
 ///
-/// Each result is a .ssbox block with this layout:
-///   .title > h3 > a            ← TITLE (番号 + 后缀, e.g. "SNOS-025-uncensored-HD")
-///   .slist > ul > li ...        ← contained files (we ignore these)
-///   .sbar > a[href=magnet:?..]  ← the magnet link
-///   .sbar text "大小:<b>5.4 GB</b>" ← total size
-/// The magnet anchor is a SIBLING of .title (not a child), so the base class's
-/// "walk up from the anchor" heuristic grabs the .sbar metadata block instead
-/// of the title. We override both to target the .ssbox container explicitly.
+/// New structure per row:
+///   article.zsky-result-row
+///     a.zsky-result-name href=/hash/{hash}.html  → title (link text)
+///     .zsky-result-meta                            → size info
 /// </summary>
 public sealed class Yhg007Source : HtmlMagnetSourceBase
 {
     public override string Name => "yhg007.com";
-    private const string BaseUrl = "https://yhg007.com";
 
     public Yhg007Source() { }
 
     protected override IEnumerable<string> SearchUrls(string query)
     {
-        var orig = query.Trim();
-        yield return $"{BaseUrl}/search-{orig}-0-0-1.html";
+        // Path segment must be escaped — raw " " or "&" breaks the URL.
+        var orig = Uri.EscapeDataString(query.Trim());
+        yield return $"https://yhg007.com/search-{orig}-0-0-1.html";
         var q = Uri.EscapeDataString(query);
-        yield return $"{BaseUrl}/search?q={q}";
-        yield return $"{BaseUrl}/search/{q}";
+        yield return $"https://yhg007.com/search?q={q}";
     }
 
-    /// <summary>Find the enclosing .ssbox, then the .title &gt; h3 text.</summary>
-    protected override string? ResolveTitle(string magnetUri, HtmlNode a, HtmlDocument doc)
+    public override async Task<List<MagnetResult>> SearchAsync(string query, CancellationToken ct = default)
     {
-        // dn= is still most reliable if present.
-        var dn = ExtractDn(magnetUri);
-        if (!string.IsNullOrWhiteSpace(dn) && IsLikelyTitle(dn)) return dn;
-
-        var box = AncestorWithClass(a, "ssbox");
-        if (box != null)
+        var results = new List<MagnetResult>();
+        using var handler = CreateHandler();
+        using var http = new HttpClient(handler)
         {
-            // .title > h3 (innerText is the title; strip a trailing size if any).
-            var h3 = box.SelectSingleNode(".//div[contains(@class,'title')]//h3")
-                     ?? box.SelectSingleNode(".//h3");
-            if (h3 != null)
+            Timeout = TimeSpan.FromSeconds(20),
+        };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
+        http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9");
+        http.DefaultRequestHeaders.Accept.ParseAdd(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+
+        string? html = null;
+        foreach (var url in SearchUrls(query))
+        {
+            try
             {
-                var t = CleanText(h3.InnerText);
-                if (IsLikelyTitle(t))
-                    return Regex.Replace(t!, @"\s*\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB)\s*$", "", RegexOptions.IgnoreCase);
+                using var resp = await http.GetAsync(url, ct);
+                Serilog.Log.Information("Magnet[{Name}]: {Url} -> {Status}", Name, url, (int)resp.StatusCode);
+                if (!resp.IsSuccessStatusCode) continue;
+                html = await resp.Content.ReadAsStringAsync(ct);
+                // New design: rows contain /hash/{40-hex}.html links.
+                if (html.Contains("/hash/", StringComparison.OrdinalIgnoreCase)) break;
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning("Magnet[{Name}]: {Url} -> {Msg}", Name, url, ex.Message);
             }
         }
-        return base.ResolveTitle(magnetUri, a, doc);
-    }
+        if (string.IsNullOrEmpty(html)) return results;
 
-    /// <summary>Size lives in the .sbar block as "大小:&lt;b&gt;5.4 GB&lt;/b&gt;".</summary>
-    protected override string BestSize(HtmlNode a)
-    {
-        var box = AncestorWithClass(a, "ssbox") ?? a.ParentNode?.ParentNode?.ParentNode;
-        var text = CleanText(box?.InnerText) ?? "";
-        // Prefer the explicit "大小:5.4 GB" marker.
-        var m = Regex.Match(text, @"大小[:：]?\s*(\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB))", RegexOptions.IgnoreCase);
-        if (m.Success) return m.Groups[1].Value.Trim();
-        return base.BestSize(a);
-    }
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
 
-    /// <summary>Walk up from a node until we hit an element whose class contains `cls`.</summary>
-    private static HtmlNode? AncestorWithClass(HtmlNode node, string cls)
-    {
-        HtmlNode? n = node;
-        for (int depth = 0; depth < 8 && n != null; depth++)
+        // Each result row has a title link: a[href*="/hash/"] with 40-hex hash.
+        var hashLinks = doc.DocumentNode.SelectNodes("//a[contains(@href,'/hash/')]");
+        if (hashLinks == null) return results;
+
+        var seen = new HashSet<string>();
+        foreach (var link in hashLinks)
         {
-            var c = n.GetAttributeValue("class", "");
-            if (c.Split(' ').Any(x => x.Equals(cls, StringComparison.Ordinal))) return n;
-            n = n.ParentNode;
+            var href = link.GetAttributeValue("href", "");
+            var m = Regex.Match(href, @"/hash/([a-fA-F0-9]{40})");
+            if (!m.Success) continue;
+            var hash = m.Groups[1].Value;
+            if (!seen.Add(hash)) continue;
+
+            var title = System.Net.WebUtility.HtmlDecode(link.InnerText)?.Trim();
+            if (string.IsNullOrWhiteSpace(title)) title = query;
+
+            // Size: look in the row's meta div.
+            var size = "";
+            var row = link.Ancestors("article").FirstOrDefault();
+            if (row != null)
+            {
+                var sizeText = System.Net.WebUtility.HtmlDecode(row.InnerText);
+                var sm = Regex.Match(sizeText, @"\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB)", RegexOptions.IgnoreCase);
+                if (sm.Success) size = sm.Value;
+            }
+
+            results.Add(new MagnetResult
+            {
+                Title = title,
+                MagnetUri = $"magnet:?xt=urn:btih:{hash}",
+                Size = size,
+                Source = Name,
+            });
+            if (results.Count >= 30) break;
         }
-        return null;
+        Serilog.Log.Information("Magnet[{Name}]: extracted {Count} magnets", Name, results.Count);
+        return results;
     }
 }

@@ -24,9 +24,15 @@ try
     var builder = WebApplication.CreateBuilder(args);
     builder.Host.UseSerilog();
 
-    // ---- CORS (allow the Tauri webview origin) ----
+    // ---- CORS — only the app's own origins ----
+    // The worker binds to loopback, but with AllowAnyOrigin ANY website open in
+    // a browser could call destructive endpoints (delete movies + files,
+    // import/overwrite the database, export-to arbitrary paths). Restrict to
+    // the Tauri webview origin and the Vite dev server.
     builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
-        p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
+        p.WithOrigins("http://tauri.localhost", "https://tauri.localhost",
+                       "http://localhost:1420", "http://127.0.0.1:1420")
+         .AllowAnyMethod().AllowAnyHeader()));
 
     // ---- Singletons ----
     builder.Services.AddSingleton<DbConnectionFactory>();
@@ -74,6 +80,7 @@ try
     app.MapMovieEndpoints();
     app.MapMetaTubeEndpoints();
     app.MapMagnetEndpoints();
+    app.MapSubtitleEndpoints();
     app.MapFavoriteEndpoints();
     app.MapActorEndpoints();
     app.MapTagEndpoints();

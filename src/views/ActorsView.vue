@@ -5,6 +5,7 @@ import type { Actor } from '@/types'
 import { useRouter } from 'vue-router'
 import { useFavoritesStore } from '@/stores/favorites'
 import { t } from '@/utils/i18n'
+import { toast } from '@/utils/toast'
 
 const router = useRouter()
 const favs = useFavoritesStore()
@@ -16,8 +17,10 @@ const loading = ref(false)
 async function load() {
   loading.value = true
   try {
-    list.value = await actors.list(q.value || undefined)
+    list.value = (await actors.list(q.value || undefined)) ?? []
     await favs.load('actor')
+  } catch (e: any) {
+    toast(t('loadFailed') + ': ' + e.message, 'error')
   } finally {
     loading.value = false
   }

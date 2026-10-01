@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
-import { metatube, magnet, movies as moviesApi, translate, MetatubeError } from '@/api/worker'
-import type { Movie, MagnetSourceResult } from '@/types'
+import { metatube, magnet, movies as moviesApi, translate, actors as actorsApi, absoluteAvatar, MetatubeError } from '@/api/worker'
+import type { Movie, MagnetSourceResult, MagnetResult } from '@/types'
 import MagnetList from '@/components/MagnetList.vue'
 import { t } from '@/utils/i18n'
 import { useLibraryStore } from '@/stores/libraries'
@@ -26,18 +26,35 @@ const stepTranslate = ref(0)
 const ingestLibId = ref<number | null>(null)
 const ingesting = ref(false)
 const ingestMsg = ref('')
+const ingestOk = ref(true)
 // ponytail: persisted in store so it survives tab switches
 const trailerUrl = ref(store.trailerUrl)
 const candidates = ref<{ provider: string; id: string; title?: string | null; coverUrl?: string | null; score?: number | null }[]>([])
 const selectedCandidate = ref(0)
 
-async function doScrape(q: string, provider: string, id: string): Promise<Movie | null> {
+async function doScrape(q: string, provider: string, id: string, seq?: number): Promise<Movie | null> {
   try {
     const m = await metatube.scrapeByProvider(q, provider, id)
+    // A stale search's result must not clobber the store (see searchSeq).
+    if (seq != null && seq !== searchSeq) return null
     store.movie = m
+    // Scraped cast has no avatars of its own — resolve them by name against
+    // the local actor cache / MetaTube so they show up before ingest.
+    if (m.actors?.length) {
+      const names = [...new Set(m.actors.map(a => a.name).filter((n): n is string => !!n))]
+      if (names.length) {
+        try {
+          const map = await actorsApi.resolveAvatars(names)
+          for (const a of m.actors) {
+            const local = a.name ? map[a.name] : null
+            if (local) a.avatarUrl = (await absoluteAvatar(local)) ?? null
+          }
+        } catch { /* avatar resolution optional */ }
+      }
+    }
     return m
   } catch (e: any) {
-    error.value = `刮削失败: ${e.message}`
+    error.value = `${t('scrapeFailed')}: ${e.message}`
     return null
   }
 }
@@ -50,7 +67,7 @@ async function pickCandidate(i: number) {
   store.movie = null
   try {
     const m = await doScrape(query.value.trim(), c.provider, c.id)
-    if (m) {
+    if (m && (m.title?.trim() || m.summary?.trim())) {
       try {
         const r = await translate.run(m.title, m.summary)
         if (r.title) m.title = r.title
@@ -72,9 +89,26 @@ onMounted(() => {
   if (store.movie || store.grouped.length) query.value = store.query
 })
 
+// Monotonic sequence so a slow earlier search can't overwrite a newer one's
+// results (fast repeat searches used to race).
+let searchSeq = 0
+
+// Group stored magnets by their source so they render in the same per-source
+// tabs a fresh network search produces.
+function groupBySource(magnets: MagnetResult[]): MagnetSourceResult[] {
+  const bySrc = new Map<string, MagnetResult[]>()
+  for (const m of magnets) {
+    const src = m.source || 'library'
+    if (!bySrc.has(src)) bySrc.set(src, [])
+    bySrc.get(src)!.push(m)
+  }
+  return [...bySrc.entries()].map(([source, results]) => ({ source, count: results.length, results }))
+}
+
 async function search() {
   const q = query.value.trim()
   if (!q) return
+  const seq = ++searchSeq
   error.value = ''
   needsConfig.value = false
   store.query = q
@@ -91,50 +125,94 @@ async function search() {
   scraping.value = true
   magLoading.value = true
 
+  // Local-first: check the library before any network call. An ingested 番号
+  // serves its stored record (real id → "已入库" badge), stored magnets and
+  // local trailer file; only pieces missing locally fall back to the network.
+  let stored: Movie | null = null
+  try { stored = await moviesApi.byNumber(q) } catch { /* not ingested → scrape */ }
+  if (seq !== searchSeq) return
+
   // First, fetch all candidates so the user can pick if there are multiple.
-  const scrapeP = metatube.candidates(q)
-    .then(async (list) => {
-      if (list.length === 0) {
-        stepScrape.value = -1
-        return
-      }
-      const m = list.length === 1
-        ? await doScrape(q, list[0].provider, list[0].id)
-        : (candidates.value = list, await doScrape(q, list[0].provider, list[0].id))
+  const scrapeP = (async () => {
+    if (stored) {
+      store.movie = stored
       stepScrape.value = 1
-      if (m) {
-        try {
-          const r = await translate.run(m.title, m.summary)
-          if (r.title) m.title = r.title
-          if (r.summary) m.summary = r.summary
-          stepTranslate.value = 1
-        } catch {
+      stepTranslate.value = 1 // 库内数据已是入库时处理过的内容
+      return
+    }
+    await metatube.candidates(q)
+      .then(async (list) => {
+        if (seq !== searchSeq) return
+        if (list.length === 0) {
+          stepScrape.value = -1
+          return
+        }
+        const m = list.length === 1
+          ? await doScrape(q, list[0].provider, list[0].id, seq)
+          : (candidates.value = list, await doScrape(q, list[0].provider, list[0].id, seq))
+        if (seq !== searchSeq) return
+        stepScrape.value = 1
+        if (m) {
+          if (m.title?.trim() || m.summary?.trim()) {
+            try {
+              const r = await translate.run(m.title, m.summary)
+              if (seq !== searchSeq) return
+              if (r.title) m.title = r.title
+              if (r.summary) m.summary = r.summary
+              stepTranslate.value = 1
+            } catch {
+              stepTranslate.value = -1
+            }
+          } else {
+            // 元数据为空 — 没有可翻译的内容，跳过翻译。
+            stepTranslate.value = 1
+          }
+        } else {
           stepTranslate.value = -1
         }
-      } else {
-        stepTranslate.value = -1
-      }
-    })
-    .catch((e) => {
-      stepScrape.value = -1
-      if (e instanceof MetatubeError && e.needsConfig) {
-        needsConfig.value = true
-        error.value = e.message
-      } else {
-        error.value = `刮削失败: ${e.message}`
-      }
-    })
-  // Grouped magnet search (#10/#11).
-  const magP = magnet.searchGrouped(q)
-    .then((r) => { store.grouped = r; stepMagnet.value = 1 })
-    .catch(() => { stepMagnet.value = -1 })
+      })
+      .catch((e) => {
+        if (seq !== searchSeq) return
+        stepScrape.value = -1
+        if (e instanceof MetatubeError && e.needsConfig) {
+          needsConfig.value = true
+          error.value = e.message
+        } else {
+          error.value = `${t('scrapeFailed')}: ${e.message}`
+        }
+      })
+  })()
+  // Grouped magnet search (#10/#11) — stored magnets serve locally, grouped
+  // per source; network search only when the library has none.
+  const localMagnets = stored?.magnets ?? []
+  const magP = localMagnets.length
+    ? Promise.resolve().then(() => {
+        if (seq !== searchSeq) return
+        store.grouped = groupBySource(localMagnets)
+        stepMagnet.value = 1
+      })
+    : magnet.searchGrouped(q)
+      .then((r) => { if (seq === searchSeq) { store.grouped = r; stepMagnet.value = 1 } })
+      .catch(() => { if (seq === searchSeq) stepMagnet.value = -1 })
 
-  // Trailer search (only once per search, not per candidate switch).
-  const trailerP = metatube.findTrailer(q)
-    .then((tr) => { trailerUrl.value = store.trailerUrl = tr.ok && tr.url ? tr.url : ''; stepTrailer.value = tr.ok && tr.url ? 1 : -1 })
-    .catch(() => { trailerUrl.value = store.trailerUrl = ''; stepTrailer.value = -1 })
+  // Trailer — the local {番号}-trailer.mp4 streams straight from the worker;
+  // DMM probe/download only when no local file exists.
+  const trailerP = stored?.hasTrailer && stored.id
+    ? moviesApi.trailerUrl(stored.id).then((u) => {
+        if (seq !== searchSeq) return
+        trailerUrl.value = store.trailerUrl = u
+        stepTrailer.value = 1
+      })
+    : metatube.findTrailer(q)
+      .then((tr) => {
+        if (seq !== searchSeq) return
+        trailerUrl.value = store.trailerUrl = tr.ok && tr.url ? tr.url : ''
+        stepTrailer.value = tr.ok && tr.url ? 1 : -1
+      })
+      .catch(() => { if (seq === searchSeq) { trailerUrl.value = store.trailerUrl = ''; stepTrailer.value = -1 } })
 
   await Promise.allSettled([scrapeP, magP, trailerP])
+  if (seq !== searchSeq) return
   scraping.value = false
   magLoading.value = false
   store.lastSearchAt = Date.now()
@@ -144,21 +222,39 @@ async function search() {
 async function ingest() {
   if (!store.movie) return
   if (ingestLibId.value == null) {
-    ingestMsg.value = '⚠ 请先选择目标媒体库'
+    ingestMsg.value = t('selectLibWarn')
+    ingestOk.value = false
     return
   }
   ingesting.value = true
   ingestMsg.value = ''
+  ingestOk.value = true
   try {
-    const res = await moviesApi.ingest(ingestLibId.value, store.movie)
+    // Pass the magnet results already shown in the UI — without them the
+    // backend would re-run the full multi-source magnet search (tens of
+    // seconds) even though the data is right here.
+    const known = store.grouped.flatMap((g) => g.results as MagnetResult[])
+    const res = await moviesApi.ingest(ingestLibId.value, store.movie, known.length ? known : undefined)
     store.movie!.id = res.movieId
     store.movie!.libraryId = ingestLibId.value
     store.movie!.folderPath = res.folderPath
-    ingestMsg.value = `已入库(影片 ID ${res.movieId})${res.folderPath ? ' — ' + res.folderPath : ''}`
+    // Refresh from the stored record: actor avatars flip to local endpoints
+    // (downloaded at ingest) and the trailer preview moves off the temp URL
+    // (ingest relocates the temp file into the movie folder).
+    try {
+      const m = await moviesApi.get(res.movieId)
+      store.movie = m
+      if (m.hasTrailer && m.id) {
+        trailerUrl.value = store.trailerUrl = await moviesApi.trailerUrl(m.id)
+        stepTrailer.value = 1
+      }
+    } catch { /* keep scraped data */ }
+    ingestMsg.value = t('ingestedId', { id: res.movieId }) + (res.folderPath ? ' — ' + res.folderPath : '')
     // Refresh library counts in the sidebar (整体 #3).
     await libs.load()
   } catch (e: any) {
-    ingestMsg.value = `入库失败: ${e.message}`
+    ingestMsg.value = `${t('ingestFailed')}: ${e.message}`
+    ingestOk.value = false
   } finally {
     ingesting.value = false
   }
@@ -177,7 +273,7 @@ async function ingest() {
           <input
             v-model="query"
             class="input !pl-10 !py-2.5 text-sm"
-            placeholder="例如:SSIS-001"
+            :placeholder="t('searchPlaceholder')"
             @keyup.enter="search"
           />
         </div>
@@ -187,7 +283,7 @@ async function ingest() {
       </div>
 
       <!-- Step progress -->
-      <div v-if="scraping || stepScrape !== 0 || stepMagnet !== 0 || stepTranslate !== 0" class="flex items-center gap-4 mt-4">
+      <div v-if="scraping || stepScrape !== 0 || stepMagnet !== 0 || stepTrailer !== 0 || stepTranslate !== 0" class="flex items-center gap-4 mt-4">
         <div v-for="s in [
           { label: t('stepScrape'), state: stepScrape },
           { label: t('stepTranslate'), state: stepTranslate },
@@ -217,7 +313,7 @@ async function ingest() {
         {{ error }}
       </span>
       <button v-if="needsConfig" class="btn-primary !py-1.5 !px-3 shrink-0" @click="router.push('/settings')">
-        <span class="i-carbon-settings" /> 去配置
+        <span class="i-carbon-settings" /> {{ t('goConfig') }}
       </button>
     </div>
 
@@ -270,7 +366,8 @@ async function ingest() {
           <span class="text-primary font-bold text-lg">{{ store.movie.number }}</span>
           <span
             v-if="store.movie.score"
-            class="chip !text-amber-400 !bg-amber-500/10 !border-amber-500/20"
+            class="text-[12px] font-semibold px-2 py-0.5 rounded-md leading-none"
+            style="background: var(--accent); color: var(--on-accent);"
           >★ {{ store.movie.score }}</span>
           <span
             v-if="store.movie.id"
@@ -292,9 +389,15 @@ async function ingest() {
             class="inline-flex items-center gap-1.5 mr-2 align-middle hover:text-primary transition-colors"
             @click="a.id && router.push(`/actors/${a.id}`)"
           >
-            <span class="w-6 h-6 rounded-full bg-surface2 overflow-hidden inline-block align-middle">
-              <img v-if="a.avatarUrl" :src="a.avatarUrl" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
-              <span v-else class="w-full h-full flex items-center justify-center text-muted text-[10px]"><span class="i-carbon-user" /></span>
+            <span class="relative w-6 h-6 rounded-full bg-surface2 overflow-hidden inline-flex items-center justify-center text-muted shrink-0">
+              <span class="i-carbon-user text-[11px]" />
+              <img
+                v-if="a.avatarUrl"
+                :src="a.avatarUrl"
+                class="absolute inset-0 w-full h-full object-cover"
+                referrerpolicy="no-referrer"
+                @error="($event.target as HTMLImageElement).style.display = 'none'"
+              />
             </span>
             <span class="text-[13px]">{{ a.name }}</span>
           </button>
@@ -304,7 +407,7 @@ async function ingest() {
         <div class="flex flex-wrap gap-x-6 gap-y-1.5 text-[13px] text-text-soft">
           <span v-if="store.movie.maker" class="flex items-center gap-1.5"><span class="i-carbon-building text-muted" />{{ store.movie.maker }}</span>
           <span v-if="store.movie.releaseDate" class="flex items-center gap-1.5"><span class="i-carbon-calendar text-muted" />{{ store.movie.releaseDate.slice(0,10) }}</span>
-          <span v-if="store.movie.runtimeMinutes" class="flex items-center gap-1.5"><span class="i-carbon-time text-muted" />{{ store.movie.runtimeMinutes }} 分钟</span>
+          <span v-if="store.movie.runtimeMinutes" class="flex items-center gap-1.5"><span class="i-carbon-time text-muted" />{{ store.movie.runtimeMinutes }} {{ t('minutes') }}</span>
         </div>
 
         <!-- Tags -->
@@ -333,16 +436,16 @@ async function ingest() {
         <p
           v-if="ingestMsg"
           class="text-[13px]"
-          :class="ingestMsg.startsWith('⚠') || ingestMsg.startsWith('入库失败') ? 'text-red-400' : 'text-status-green'"
+          :class="ingestOk ? 'text-status-green' : 'text-red-400'"
         >{{ ingestMsg }}</p>
-        <p v-if="!libs.items.length" class="text-xs text-muted">先到「设置 → 媒体库」新建一个媒体库。</p>
+        <p v-if="!libs.items.length" class="text-xs text-muted">{{ t('notIngestedHint') }}</p>
       </div>
     </div>
 
     <!-- Magnet results (grouped, per-source tabs) -->
     <section>
       <div class="flex items-center gap-2 mb-4">
-        <span class="i-carbon-magnet text-lg text-primary" />
+        <span class="i-carbon-link text-lg text-primary" />
         <h2 class="text-lg font-semibold">{{ t('magnetLinks') }}</h2>
       </div>
       <MagnetList :grouped="store.grouped" :loading="magLoading" />

@@ -24,7 +24,9 @@ public static class FavoriteEndpoints
             {
                 "movie" => @"
                     SELECT f.id AS Id, f.target_type AS TargetType, f.target_id AS TargetId,
-                           m.number AS Name, m.title AS Subtitle, m.cover_url AS Cover
+                           m.number AS Name, m.title AS Subtitle,
+                           CASE WHEN m.id IS NOT NULL
+                                THEN '/api/movies/' || m.id || '/image/thumb' END AS Cover
                     FROM favorites f
                     LEFT JOIN movies m ON m.id = f.target_id
                     WHERE f.target_type='movie'
@@ -47,6 +49,22 @@ public static class FavoriteEndpoints
             };
             object param = t is "movie" or "actor" or "tag" ? new { } : new { t };
             var rows = (await c.QueryAsync<FavoriteRow>(sql, param)).ToList();
+            // Movie badge flags (video file / trailer present) — needs real
+            // filesystem checks, so compute them per favorited movie here.
+            if (t == "movie" && rows.Count > 0)
+            {
+                var ids = rows.Select(r => r.TargetId).ToList();
+                var infos = (await c.QueryAsync<(long Id, string? Folder, string Number, string? Source)>(
+                    "SELECT id Id, folder_path Folder, number Number, source_path Source FROM movies WHERE id IN @ids",
+                    new { ids })).ToDictionary(x => x.Id);
+                foreach (var r in rows)
+                {
+                    if (!infos.TryGetValue(r.TargetId, out var info)) continue;
+                    r.HasVideo = MovieEndpoints.HasVideoFile(info.Folder, info.Number, info.Source);
+                    r.HasTrailer = !string.IsNullOrWhiteSpace(info.Folder)
+                        && File.Exists(Path.Combine(info.Folder, $"{info.Number}-trailer.mp4"));
+                }
+            }
             return Results.Ok(rows);
         });
 
@@ -110,6 +128,9 @@ public sealed class FavoriteRow
     public string? Name { get; set; }
     public string? Subtitle { get; set; }
     public string? Cover { get; set; }
+    // Movie badge flags (null for actor/tag favorites).
+    public bool? HasVideo { get; set; }
+    public bool? HasTrailer { get; set; }
 }
 // TargetIds defaults to empty so a missing/null array doesn't 400. Accept both
 // camelCase (ASP.NET default) and PascalCase (what the client historically sent).

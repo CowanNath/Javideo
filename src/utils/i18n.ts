@@ -16,6 +16,7 @@ const dict = {
     searchBtn: '搜索', searching: '搜索中…',
     stepScrape: '元数据', stepMagnet: '磁力链接', stepTrailer: '预告片', stepTranslate: '翻译',
     openFolder: '打开文件夹',
+    moveTo: '移动到', moveConfirm: '确定移动到', moveFail: '移动失败',
     searchSubtitle: '输入番号，刮削元数据并搜索磁力链接',
     number: '番号', actorsLabel: '演员',
     selectLib: '选择目标媒体库', ingest: '入库', ingesting: '入库中…',
@@ -122,6 +123,33 @@ const dict = {
     playFailed: '播放失败',
     // about
     version: '版本', update: '更新',
+    // hardcoded-string cleanup round
+    scrapeFailed: '刮削失败', ingestFailed: '入库失败',
+    ingestedId: '已入库(影片 ID {id})', noMatch: '未匹配到结果',
+    collapseSidebar: '收起侧边栏', expandSidebar: '展开侧边栏',
+    noMagnetResults: '未找到磁力链接', sourceEmpty: '该搜索源暂无结果',
+    copy: '复制', copied: '已复制', copyMagnet: '复制磁力链接', totalItems: '共 {n} 条',
+    playerPathPlaceholder: '例如:C:\\Program Files\\mpv\\mpv.exe',
+    rename: '重命名', itemsCount: '项', saveFail: '保存失败', favFail: '收藏操作失败',
+    allLibraries: '全部',
+    heroTitle: '让每一部收藏，都有归处。', heroSub: '整理、发现、重温。属于你的私人放映室。',
+    heroLocal: '本地珍藏', footerLocal: '本地媒体库',
+    retry: '重试', queued: '排队中',
+    hasVideo: '有视频', hasTrailer: '有预告',
+    statTotal: '影片总数', statPlayable: '可播放', statTrailers: '预告片',
+    statHours: '小时', statDistribution: '各库分布', statDuration: '总时长',
+    cacheLocal: '元数据缓存到本地（适合网盘库）',
+    cacheLocalHint: '适合网盘映射目录：封面、nfo、预告片、字幕等都保存到本地缓存，只有播放视频时才访问网盘。再次入库会自动更新缓存。',
+    addActor: '添加演员', renameActor: '重命名演员', removeActor: '移除演员',
+    actorNamePlaceholder: '演员名',
+    actorAdded: '演员已添加', actorRemoved: '演员已移除', actorUpdated: '演员已更新',
+    subtitles: '字幕', download: '下载', subDownloaded: '已下载',
+    subNone: '没有匹配到字幕', subScore: '匹配度', subDurDiff: '时长差',
+    subGcidHit: 'GCID 精确匹配（同内容视频）',
+    // pagination bar
+    playTrailer: '播放预告片', backToCover: '返回封面', addFavorite: '收藏影片',
+    previewImage: '预览图 {n}', movieDetails: '影片详情', closeDetails: '返回影片列表',
+    pageOf: '页次', prevPage: '上一页', nextPage: '下一页',
   },
   en: {
     search: 'Search', favorites: 'Favorites', actors: 'Actors', tags: 'Tags', settings: 'Settings',
@@ -131,6 +159,7 @@ const dict = {
     searchBtn: 'Search', searching: 'Searching…',
     stepScrape: 'Metadata', stepMagnet: 'Magnet', stepTrailer: 'Trailer', stepTranslate: 'Translate',
     openFolder: 'Open Folder',
+    moveTo: 'Move to', moveConfirm: 'Move to', moveFail: 'Move failed',
     searchSubtitle: 'Enter a code or actor name to scrape metadata and search magnets',
     number: 'Code', actorsLabel: 'Actors',
     selectLib: 'Select library', ingest: 'Ingest', ingesting: 'Ingesting…',
@@ -223,6 +252,31 @@ const dict = {
     noPlayer: 'No player configured, using system default',
     playFailed: 'Playback failed',
     version: 'Version', update: 'Update',
+    scrapeFailed: 'Scrape failed', ingestFailed: 'Ingest failed',
+    ingestedId: 'In library (movie ID {id})', noMatch: 'No matches',
+    collapseSidebar: 'Collapse sidebar', expandSidebar: 'Expand sidebar',
+    noMagnetResults: 'No magnet links found', sourceEmpty: 'No results from this source',
+    copy: 'Copy', copied: 'Copied', copyMagnet: 'Copy magnet link', totalItems: '{n} total',
+    playerPathPlaceholder: 'e.g. C:\\Program Files\\mpv\\mpv.exe',
+    rename: 'Rename', itemsCount: 'items', saveFail: 'Save failed', favFail: 'Failed to update favorite',
+    allLibraries: 'All',
+    heroTitle: 'Every collection deserves its place.', heroSub: 'Organize, discover, revisit — your private cinema.',
+    heroLocal: 'Local collection', footerLocal: 'Local library',
+    retry: 'Retry', queued: 'Queued',
+    hasVideo: 'Video', hasTrailer: 'Trailer',
+    statTotal: 'Total', statPlayable: 'Playable', statTrailers: 'Trailers',
+    statHours: 'h', statDistribution: 'Distribution', statDuration: 'Total runtime',
+    cacheLocal: 'Cache metadata locally (for cloud drives)',
+    cacheLocalHint: 'For cloud-mapped directories: posters, nfo, trailers and subtitles are stored in a local cache — the cloud is only accessed when playing a video. Re-ingesting refreshes the cache.',
+    addActor: 'Add actor', renameActor: 'Rename actor', removeActor: 'Remove actor',
+    actorNamePlaceholder: 'Actor name',
+    actorAdded: 'Actor added', actorRemoved: 'Actor removed', actorUpdated: 'Actor updated',
+    subtitles: 'Subtitles', download: 'Download', subDownloaded: 'Saved',
+    subNone: 'No subtitles matched', subScore: 'Score', subDurDiff: 'Duration diff',
+    subGcidHit: 'GCID exact match (same content)',
+    playTrailer: 'Play trailer', backToCover: 'Back to cover', addFavorite: 'Favorite movie',
+    previewImage: 'Preview image {n}', movieDetails: 'Movie details', closeDetails: 'Back to movies',
+    pageOf: 'Page', prevPage: 'Previous page', nextPage: 'Next page',
   }
 } as const
 
@@ -242,6 +296,10 @@ export function setLang(lang: Lang) {
   document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN'
 }
 
-export function t(key: TKey): string {
-  return dict[currentLang.value][key] ?? dict.zh[key] ?? key
+export function t(key: TKey, params?: Record<string, string | number>): string {
+  const str: string = dict[currentLang.value][key] ?? dict.zh[key] ?? key
+  // Interpolate {name} placeholders, e.g. t('ingestedId', { id: 42 }).
+  return params
+    ? str.replace(/\{(\w+)\}/g, (_, k) => String(params[k] ?? `{${k}}`))
+    : str
 }

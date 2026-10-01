@@ -29,13 +29,34 @@ public sealed class IngestService
         if (m.LibraryId is not long libId)
             throw new InvalidOperationException("入库需要一个目标媒体库 (LibraryId)。");
 
+        // Resolve actor avatars up-front — these are network calls (MetaTube)
+        // and must not run inside the write transaction below, or the DB lock
+        // would be held across HTTP round-trips.
+        var actorRows = new List<(string Name, string? Avatar)>();
+        foreach (var a in m.Actors)
+        {
+            if (string.IsNullOrWhiteSpace(a.Name)) continue;
+            var avatar = a.AvatarUrl;
+            if (string.IsNullOrWhiteSpace(avatar))
+            {
+                try { avatar = (await _metaTube.GetActorAsync(a.Name))?.AvatarUrl; }
+                catch { /* MetaTube optional — keep empty avatar */ }
+            }
+            actorRows.Add((a.Name, avatar));
+        }
+
         await using var c = _db.Create();
         await c.OpenAsync();
 
-        // Upsert movie.
+        // One transaction for the upsert + association rebuild: without it, a
+        // failure between "clear old actors/tags/magnets" and "re-insert" left
+        // the movie stripped of its associations.
+        await using var tx = c.BeginTransaction();
+
+        // Upsert movie. INSERT ... ON CONFLICT ... RETURNING always yields the id.
         var prevJson = m.PreviewImages?.Any() == true
             ? System.Text.Json.JsonSerializer.Serialize(m.PreviewImages) : null;
-        var movieId = await c.ExecuteScalarAsync<long?>(@"
+        var movieId = await c.ExecuteScalarAsync<long>(@"
             INSERT INTO movies (library_id, number, title, original_title, summary, maker, label,
                                 series, director, release_date, runtime_minutes, cover_url, thumb_url,
                                 score, provider, homepage_url, preview_images)
@@ -50,35 +71,39 @@ public sealed class IngestService
                 score=excluded.score, provider=excluded.provider,
                 homepage_url=excluded.homepage_url,
                 preview_images=COALESCE(excluded.preview_images, movies.preview_images)
-            RETURNING id;", new { m.LibraryId, m.Number, m.Title, m.OriginalTitle, m.Summary, m.Maker, m.Label, m.Series, m.Director, m.ReleaseDate, m.RuntimeMinutes, m.CoverUrl, m.ThumbUrl, m.Score, m.Provider, m.HomepageUrl, prevJson });
-        if (movieId is null)
-            movieId = await c.ExecuteScalarAsync<long>(
-                "SELECT id FROM movies WHERE number=@Number AND library_id=@LibraryId", m);
+            RETURNING id;", new { m.LibraryId, m.Number, m.Title, m.OriginalTitle, m.Summary, m.Maker, m.Label, m.Series, m.Director, m.ReleaseDate, m.RuntimeMinutes, m.CoverUrl, m.ThumbUrl, m.Score, m.Provider, m.HomepageUrl, prevJson }, tx);
 
-        // Actors — clear old associations first (so rescrape replaces, not appends),
-        // then re-insert. Tags and magnets are also cleared for a clean update.
-        await c.ExecuteAsync("DELETE FROM movie_actors WHERE movie_id=@id", new { id = movieId });
-        await c.ExecuteAsync("DELETE FROM movie_tags WHERE movie_id=@id", new { id = movieId });
-        await c.ExecuteAsync("DELETE FROM magnets WHERE movie_id=@id", new { id = movieId });
+        // Clear old associations first (so rescrape replaces, not appends),
+        // then re-insert — all inside the same transaction. Manually added
+        // custom tags (and file-marker tags like 中文/无码修复/4K) survive the
+        // rebuild: they don't come from MetaTube and would otherwise be wiped
+        // on every rescrape.
+        var keptTagIds = (await c.QueryAsync<long>(
+            "SELECT mt.tag_id FROM movie_tags mt JOIN tags t ON t.id=mt.tag_id " +
+            "WHERE mt.movie_id=@id AND t.category='custom' AND t.is_standard=0",
+            new { id = movieId }, tx)).ToList();
+        // Manually added actors survive rescrape too (MetaTube may return none).
+        var keptManualActors = (await c.QueryAsync<long>(
+            "SELECT actor_id FROM movie_actors WHERE movie_id=@id AND manual=1",
+            new { id = movieId }, tx)).ToList();
+        await c.ExecuteAsync("DELETE FROM movie_actors WHERE movie_id=@id AND manual=0", new { id = movieId }, tx);
+        await c.ExecuteAsync("DELETE FROM movie_tags WHERE movie_id=@id", new { id = movieId }, tx);
+        await c.ExecuteAsync("DELETE FROM magnets WHERE movie_id=@id", new { id = movieId }, tx);
 
-        // Re-insert actors — resolve avatar via MetaTube when none is present.
-        foreach (var a in m.Actors)
+        // Re-insert actors.
+        var pendingAvatars = new List<(long ActorId, string Url)>();
+        foreach (var (name, avatar) in actorRows)
         {
-            if (string.IsNullOrWhiteSpace(a.Name)) continue;
-            var avatar = a.AvatarUrl;
-            if (string.IsNullOrWhiteSpace(avatar))
-            {
-                try { avatar = (await _metaTube.GetActorAsync(a.Name))?.AvatarUrl; }
-                catch { /* MetaTube optional — keep empty avatar */ }
-            }
             await c.ExecuteAsync(
                 "INSERT INTO actors(name, avatar_url) VALUES(@name,@avatar) ON CONFLICT(name) DO UPDATE SET avatar_url=COALESCE(@avatar, avatar_url)",
-                new { name = a.Name, avatar });
+                new { name, avatar }, tx);
             var actorId = await c.ExecuteScalarAsync<long>(
-                "SELECT id FROM actors WHERE name=@name", new { name = a.Name });
+                "SELECT id FROM actors WHERE name=@name", new { name }, tx);
+            if (!string.IsNullOrWhiteSpace(avatar))
+                pendingAvatars.Add((actorId, avatar));
             await c.ExecuteAsync(
                 "INSERT OR IGNORE INTO movie_actors(movie_id, actor_id) VALUES(@m,@a)",
-                new { m = movieId, a = actorId });
+                new { m = movieId, a = actorId }, tx);
         }
 
         // Tags.
@@ -88,14 +113,26 @@ public sealed class IngestService
             await c.ExecuteAsync(@"
                 INSERT INTO tags(name, category, is_standard) VALUES(@name,@cat,@std)
                 ON CONFLICT(name, category, is_standard) DO NOTHING",
-                new { name = t.Name, cat = t.Category, std = t.IsStandard ? 1 : 0 });
+                new { name = t.Name, cat = t.Category, std = t.IsStandard ? 1 : 0 }, tx);
             var tagId = await c.ExecuteScalarAsync<long>(
                 "SELECT id FROM tags WHERE name=@name AND category=@cat AND is_standard=@std",
-                new { name = t.Name, cat = t.Category, std = t.IsStandard ? 1 : 0 });
+                new { name = t.Name, cat = t.Category, std = t.IsStandard ? 1 : 0 }, tx);
             await c.ExecuteAsync(
                 "INSERT OR IGNORE INTO movie_tags(movie_id, tag_id) VALUES(@m,@t)",
-                new { m = movieId, t = tagId });
+                new { m = movieId, t = tagId }, tx);
         }
+
+        // Re-link the preserved custom tags.
+        foreach (var tid in keptTagIds)
+            await c.ExecuteAsync(
+                "INSERT OR IGNORE INTO movie_tags(movie_id, tag_id) VALUES(@m,@t)",
+                new { m = movieId, t = tid }, tx);
+
+        // Re-link the preserved manual actors.
+        foreach (var aid in keptManualActors)
+            await c.ExecuteAsync(
+                "INSERT OR IGNORE INTO movie_actors(movie_id, actor_id, manual) VALUES(@m,@a,1)",
+                new { m = movieId, a = aid }, tx);
 
         // Magnets.
         foreach (var mg in magnets.DistinctBy(x => x.MagnetUri))
@@ -103,14 +140,37 @@ public sealed class IngestService
             await c.ExecuteAsync(@"
                 INSERT INTO magnets(movie_id, query, title, size, magnet_uri, source)
                 VALUES(@m,@q,@title,@size,@uri,@src)",
-                new { m = movieId, q = m.Number, title = mg.Title, size = mg.Size, uri = mg.MagnetUri, src = mg.Source });
+                new { m = movieId, q = m.Number, title = mg.Title, size = mg.Size, uri = mg.MagnetUri, src = mg.Source }, tx);
+        }
+
+        tx.Commit();
+
+        // Prefetch actor avatars into the local cache now (outside the tx —
+        // these are network downloads), so the actors page never depends on
+        // the remote image host being reachable. Already-cached files skip.
+        if (pendingAvatars.Count > 0)
+        {
+            var avatars = _sp.GetRequiredService<AvatarService>();
+            foreach (var (actorId, url) in pendingAvatars)
+            {
+                if (File.Exists(avatars.LocalPathFor(actorId))) continue;
+                try { await avatars.EnsureLocalAsync(actorId, url); }
+                catch (Exception ex) { Serilog.Log.Warning(ex, "Avatar prefetch failed for actor {Id}", actorId); }
+            }
         }
 
         // ---- File outputs: nfo / poster / thumb / magnet.txt ----
         string? folderPath = null;
         try
         {
-            var baseDir = await _libs.FirstAvailableDirectoryAsync(libId);
+            // Cloud-drive library (cache_local): all metadata files go to a
+            // local cache folder under the app data dir — only the video file
+            // itself stays on the remote drive.
+            var cacheLocal = await c.ExecuteScalarAsync<long?>(
+                "SELECT cache_local FROM libraries WHERE id=@id", new { id = libId }) == 1;
+            var baseDir = cacheLocal
+                ? Path.Combine(_db.DataDir, "cache")
+                : await _libs.FirstAvailableDirectoryAsync(libId);
             if (!string.IsNullOrWhiteSpace(baseDir))
             {
                 folderPath = Path.Combine(baseDir, SafeFolder(m.Number));
@@ -159,13 +219,13 @@ public sealed class IngestService
             var previewSvc = _sp.GetRequiredService<PreviewImageService>();
             try
             {
-                var oldDir = previewSvc.DirFor(movieId.Value);
+                var oldDir = previewSvc.DirFor(movieId);
                 if (Directory.Exists(oldDir)) Directory.Delete(oldDir, recursive: true);
             }
             catch { /* best effort */ }
             if (m.PreviewImages?.Count > 0)
             {
-                try { await previewSvc.CacheAsync(movieId.Value, m.PreviewImages); }
+                try { await previewSvc.CacheAsync(movieId, m.PreviewImages); }
                 catch (Exception ex) { Serilog.Log.Warning(ex, "Preview cache failed for movie {Id}", movieId); }
             }
         }
@@ -174,10 +234,10 @@ public sealed class IngestService
             Serilog.Log.Warning(ex, "File output failed for {Number}", m.Number);
         }
 
-        return new IngestResult(movieId.Value, folderPath, true);
+        return new IngestResult(movieId, folderPath, true);
     }
 
-    private static string SafeFolder(string number)
+    internal static string SafeFolder(string number)
     {
         var invalid = Path.GetInvalidFileNameChars();
         var safe = new string(number.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());

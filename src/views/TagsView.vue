@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
 import { tags } from '@/api/worker'
 import type { Tag } from '@/types'
 import { useRouter } from 'vue-router'
@@ -15,11 +15,13 @@ async function load() {
   loading.value = true
   try {
     if (category.value === 'custom') {
-      const all = await tags.list()
+      const all = (await tags.list()) ?? []
       list.value = all.filter((t) => !t.isStandard || t.category === 'custom')
     } else {
-      list.value = await tags.list({ category: category.value })
+      list.value = (await tags.list({ category: category.value })) ?? []
     }
+  } catch (e: any) {
+    toast(ti('loadFailed') + ': ' + e.message, 'error')
   } finally {
     loading.value = false
   }
@@ -30,12 +32,25 @@ function switchCat(c: typeof category.value) {
 }
 onMounted(load)
 
-async function renameTag(t: Tag) {
-  const name = prompt(ti('editTagName'), t.name)
-  if (!name || name.trim() === t.name) return
+// Rename via an in-app dialog — window.prompt is blocked by Tauri and always
+// returns null, which made the old prompt()-based rename silently do nothing.
+const renaming = ref<Tag | null>(null)
+const renameName = ref('')
+const renameInput = ref<HTMLInputElement | null>(null)
+
+function openRename(tag: Tag) {
+  renaming.value = tag
+  renameName.value = tag.name
+  nextTick(() => { renameInput.value?.focus(); renameInput.value?.select() })
+}
+async function commitRename() {
+  const tag = renaming.value
+  const name = renameName.value.trim()
+  if (!tag || !name || name === tag.name) { renaming.value = null; return }
   try {
-    await tags.rename(t.id, name.trim())
+    await tags.rename(tag.id, name)
     toast(ti('tagUpdated'), 'success')
+    renaming.value = null
     load()
   } catch (e: any) {
     toast(e.message, 'error')
@@ -44,7 +59,7 @@ async function renameTag(t: Tag) {
 
 const cats: { key: typeof category.value; label: string; icon: string }[] = [
   { key: 'genre', label: ti('genre'), icon: 'i-carbon-category' },
-  { key: 'series', label: ti('series'), icon: 'i-carbon-series' },
+  { key: 'series', label: ti('series'), icon: 'i-carbon-list' },
   { key: 'maker', label: ti('maker'), icon: 'i-carbon-building' },
   { key: 'custom', label: ti('custom'), icon: 'i-carbon-tag-edit' },
 ]
@@ -91,9 +106,34 @@ const cats: { key: typeof category.value; label: string; icon: string }[] = [
         >{{ t.movieCount ?? 0 }}</span>
         <button v-if="category === 'custom'"
           class="w-5 h-5 rounded-full inline-flex items-center justify-center text-muted hover:text-text hover:bg-surface2 align-middle"
-          :title="ti('editTag')" @click.stop="renameTag(t)"
+          :title="ti('editTag')" :aria-label="ti('editTag')" @click.stop="openRename(t)"
         ><span class="i-carbon-edit text-[11px]" /></button>
       </span>
     </div>
+
+    <!-- Rename dialog (in-app; Tauri blocks window.prompt) -->
+    <Teleport to="body">
+      <div
+        v-if="renaming"
+        class="fixed inset-0 z-[60] flex items-center justify-center"
+        style="background: rgba(0,0,0,0.5); backdrop-filter: blur(3px);"
+        @click.self="renaming = null"
+      >
+        <div class="card !rounded-lg w-[360px] max-w-[90vw] p-5 shadow-lg">
+          <div class="text-[15px] font-semibold mb-3">{{ ti('editTagName') }}</div>
+          <input
+            ref="renameInput"
+            v-model="renameName"
+            class="input mb-4"
+            @keydown.enter.prevent="commitRename"
+            @keydown.escape="renaming = null"
+          />
+          <div class="flex justify-end gap-2">
+            <button class="btn" @click="renaming = null">{{ ti('cancel') }}</button>
+            <button class="btn-primary" @click="commitRename">{{ ti('rename') }}</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

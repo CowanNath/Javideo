@@ -19,6 +19,8 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // ponytail: generated binaries are not frontend inputs; ignore them to avoid Windows file-lock errors.
+    watch: { ignored: ['**/src-tauri/target/**', '**/worker/bin/**', '**/worker/obj/**', '**/Javideo-app/**', '**/.tmp/**'] },
   },
   define: {
     __DEV_WORKER_BASE__: JSON.stringify(devWorkerBase),

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
 import type { Library } from '@/types'
 import { libraries as api } from '@/api/worker'
 import { useBackdropClose } from '@/utils/clickOutside'
@@ -9,12 +9,13 @@ import { t } from '@/utils/i18n'
 const props = defineProps<{ modelValue: boolean; library?: Library | null }>()
 const emit = defineEmits<{
   'update:modelValue': [v: boolean]
-  save: [lib: { name: string; metadataSource: string; directories: string[] }]
+  save: [lib: { name: string; metadataSource: string; directories: string[]; cacheLocal: boolean }]
 }>()
 
 const name = ref('')
 const metadataSource = ref('metatube')
 const directories = ref<string[]>([''])
+const cacheLocal = ref(false)
 
 // Validation state.
 const nameTaken = ref(false)        // #2: duplicate name
@@ -25,12 +26,17 @@ const errorMsg = ref('')
 watch(
   () => props.modelValue,
   (open) => {
+    // Escape-to-close + body scroll lock while the dialog is up.
+    window.removeEventListener('keydown', onKeydown)
+    document.body.style.overflow = open ? 'hidden' : ''
+    if (open) window.addEventListener('keydown', onKeydown)
     if (open) {
       name.value = props.library?.name ?? ''
       metadataSource.value = props.library?.metadataSource ?? 'metatube'
       directories.value = props.library?.directories?.length
         ? [...props.library.directories]
         : ['']
+      cacheLocal.value = !!props.library?.cacheLocal
       nameTaken.value = false
       dirExists.value = {}
       dirChecking.value = {}
@@ -40,8 +46,16 @@ watch(
     }
   },
 )
+onUnmounted(() => {
+  document.body.style.overflow = ''
+  window.removeEventListener('keydown', onKeydown)
+})
 
 const backdrop = useBackdropClose(() => close())
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') close()
+}
 
 function close() { emit('update:modelValue', false) }
 
@@ -86,8 +100,12 @@ async function browse(i: number) {
 
 function removeDir(i: number) {
   directories.value.splice(i, 1)
-  delete dirExists.value[i]
+  // Indexes shifted — rebuild validation state from scratch so a missing dir
+  // can't hide behind a stale index and slip past the save guard.
+  dirExists.value = {}
+  dirChecking.value = {}
   if (!directories.value.length) directories.value.push('')
+  directories.value.forEach((_, idx) => checkDir(idx))
 }
 
 // Any directory that doesn't exist (only those filled in).
@@ -104,7 +122,7 @@ function save() {
     errorMsg.value = t('fixDirs')
     return
   }
-  emit('save', { name: name.value.trim(), metadataSource: metadataSource.value, directories: dirs })
+  emit('save', { name: name.value.trim(), metadataSource: metadataSource.value, directories: dirs, cacheLocal: cacheLocal.value })
   close()
 }
 </script>
@@ -155,9 +173,9 @@ function save() {
                     :placeholder="t('dirPlaceholder')"
                     @input="onDirInput(i)"
                   />
-                  <!-- #1: folder picker button (before the X) -->
-                  <button class="btn !px-2.5 shrink-0" :title="t('browseFolder')" @click="browse(i)">
-                    ...
+                  <!-- #1: native folder picker button -->
+                  <button class="btn !px-2.5 shrink-0" :title="t('browseFolder')" :aria-label="t('browseFolder')" @click="browse(i)">
+                    <span class="i-carbon-folder-open" />
                   </button>
                   <button class="btn-ghost !px-2.5 shrink-0" :title="t('remove')" @click="removeDir(i)">
                     <span class="i-carbon-close" />
@@ -177,13 +195,22 @@ function save() {
               {{ t('dirHint') }}
             </p>
 
+            <!-- 网盘映射库：元数据本地缓存 -->
+            <label class="flex items-start gap-2.5 mt-2 cursor-pointer">
+              <input type="checkbox" v-model="cacheLocal" class="mt-0.5 w-4 h-4 shrink-0 accent-[var(--primary)]" />
+              <span class="min-w-0">
+                <span class="block text-[13px] text-text-soft font-medium">{{ t('cacheLocal') }}</span>
+                <span class="block text-[11px] text-muted leading-relaxed mt-0.5">{{ t('cacheLocalHint') }}</span>
+              </span>
+            </label>
+
           </div>
 
           <p v-if="errorMsg" class="text-[12px] text-red-400">{{ errorMsg }}</p>
         </div>
         <div class="px-5 py-4 border-t border-border flex justify-end gap-2">
           <button class="btn" @click="close">{{ t('cancel') }}</button>
-          <button class="btn-primary" @click="save">{{ t('saveLib') }}</button>
+          <button class="btn-accent" @click="save">{{ t('saveLib') }}</button>
         </div>
       </div>
     </div>

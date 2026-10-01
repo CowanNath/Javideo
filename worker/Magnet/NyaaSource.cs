@@ -23,20 +23,15 @@ public sealed class NyaaSource : HtmlMagnetSourceBase
 
     /// <summary>Nyaa has a fixed table layout — override the base extraction to
     /// parse rows precisely rather than scanning for anchor tags.</summary>
-    public new async Task<List<Models.MagnetResult>> SearchAsync(string query, CancellationToken ct = default)
+    public override async Task<List<Models.MagnetResult>> SearchAsync(string query, CancellationToken ct = default)
     {
         var results = new List<Models.MagnetResult>();
-        using var handler = new System.Net.Http.HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
-        };
+        using var handler = CreateHandler();
         using var http = new HttpClient(handler)
         {
             Timeout = TimeSpan.FromSeconds(20),
         };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
         http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7");
         http.DefaultRequestHeaders.Accept.ParseAdd(
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
@@ -70,8 +65,11 @@ public sealed class NyaaSource : HtmlMagnetSourceBase
                 var titleCell = row.SelectSingleNode("td[2]");
                 var titleLink = titleCell?.SelectSingleNode("a");
                 if (titleLink == null) continue;
-                var title = titleLink.GetAttributeValue("title", "")
-                            ?? System.Net.WebUtility.HtmlDecode(titleLink.InnerText)?.Trim();
+                // GetAttributeValue returns "" (not null) when the attribute is
+                // missing — fall back to the link text explicitly.
+                var title = titleLink.GetAttributeValue("title", "");
+                if (string.IsNullOrWhiteSpace(title))
+                    title = System.Net.WebUtility.HtmlDecode(titleLink.InnerText)?.Trim() ?? "";
                 if (string.IsNullOrWhiteSpace(title)) continue;
 
                 // td:nth-child(3) > a:last — magnet link (last <a> in cell 3).

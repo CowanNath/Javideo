@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Dapper;
 using Javideo.Worker.Db;
 using Javideo.Worker.Services;
@@ -6,6 +7,12 @@ namespace Javideo.Worker.Endpoints;
 
 public static class MetaTubeEndpoints
 {
+    /// <summary>The 番号 route parameter is used to build temp file paths —
+    /// restrict it to fanhao-safe characters so "..\..\" style inputs can't
+    /// escape the temp directory (path traversal).</summary>
+    private static bool IsSafeNumber(string number) =>
+        Regex.IsMatch(number, "^[A-Za-z0-9-]+$");
+
     public static void MapMetaTubeEndpoints(this WebApplication app)
     {
         var g = app.MapGroup("/api/metatube").WithTags("MetaTube");
@@ -54,6 +61,7 @@ public static class MetaTubeEndpoints
         // Used by the search page to show a trailer without ingesting first.
         g.MapGet("/trailer/{number}", async (string number, TrailerClient tc, SettingsService settings) =>
         {
+            if (!IsSafeNumber(number)) return Results.BadRequest();
             var on = (await settings.GetAsync(SettingsService.KeyScrapeTrailer))?.Trim();
             if (!string.Equals(on, "true", StringComparison.OrdinalIgnoreCase))
                 return Results.Ok(new { ok = false, url = (string?)null });
@@ -85,6 +93,7 @@ public static class MetaTubeEndpoints
         // Serve temp trailer for search-time playback (streamed from disk).
         g.MapGet("/trailer-temp/{number}", (string number) =>
         {
+            if (!IsSafeNumber(number)) return Results.BadRequest();
             var path = TrailerClient.TempPathFor(number);
             return File.Exists(path) ? Results.File(path, "video/mp4", enableRangeProcessing: true) : Results.NotFound();
         });
