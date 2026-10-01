@@ -139,7 +139,7 @@
 │  │    javideo-worker.exe (.NET 8 Kestrel)       │   │
 │  │  - MetaTube 刮削客户端                       │   │
 │  │  - 多源磁力搜索（Btdig / Nyaa / Yhg007）     │   │
-│  │  - 字幕匹配（迅雷接口，GCID 内容指纹）       │   │
+│  │  - 字幕匹配（GCID 内容指纹）       │   │
 │  │  - SQLite 数据持久化（WAL 模式）             │   │
 │  │  - NFO / 封面 / 缩略图 / 头像写入            │   │
 │  │  - DMM 预告片下载（支持代理）                │   │
