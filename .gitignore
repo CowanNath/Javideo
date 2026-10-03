@@ -23,3 +23,6 @@ Javideo-app/
 # regression-check build output
 scripts/trailer-checks/bin/
 scripts/trailer-checks/obj/
+
+scripts/library-checks/bin/
+scripts/library-checks/obj/
