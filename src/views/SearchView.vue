@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { metatube, magnet, movies as moviesApi, translate, actors as actorsApi, absoluteAvatar, MetatubeError } from '@/api/worker'
 import type { Movie, MagnetSourceResult, MagnetResult } from '@/types'
 import MagnetList from '@/components/MagnetList.vue'
@@ -32,12 +32,10 @@ const trailerUrl = ref(store.trailerUrl)
 const candidates = ref<{ provider: string; id: string; title?: string | null; coverUrl?: string | null; score?: number | null }[]>([])
 const selectedCandidate = ref(0)
 
-async function doScrape(q: string, provider: string, id: string, seq?: number): Promise<Movie | null> {
+async function doScrape(q: string, provider: string, id: string, seq: number): Promise<Movie | null> {
   try {
     const m = await metatube.scrapeByProvider(q, provider, id)
-    // A stale search's result must not clobber the store (see searchSeq).
-    if (seq != null && seq !== searchSeq) return null
-    store.movie = m
+    if (seq !== resultSeq) return null
     // Scraped cast has no avatars of its own — resolve them by name against
     // the local actor cache / MetaTube so they show up before ingest.
     if (m.actors?.length) {
@@ -52,30 +50,48 @@ async function doScrape(q: string, provider: string, id: string, seq?: number): 
         } catch { /* avatar resolution optional */ }
       }
     }
-    return m
+    if (seq !== resultSeq) return null
+    store.movie = m
+    // Return the reactive movie so translated fields update the view.
+    return store.movie
   } catch (e: any) {
+    if (seq !== resultSeq) return null
     error.value = `${t('scrapeFailed')}: ${e.message}`
     return null
   }
 }
 
+async function scrapeAndTranslate(q: string, provider: string, id: string, seq: number) {
+  const m = await doScrape(q, provider, id, seq)
+  if (seq !== resultSeq) return
+  stepScrape.value = m ? 1 : -1
+  if (!m) { stepTranslate.value = -1; return }
+  if (!m.title?.trim() && !m.summary?.trim()) { stepTranslate.value = 1; return }
+  try {
+    const r = await translate.run(m.title, m.summary)
+    if (seq !== resultSeq) return
+    if (r.title) m.title = r.title
+    if (r.summary) m.summary = r.summary
+    stepTranslate.value = 1
+  } catch {
+    if (seq === resultSeq) stepTranslate.value = -1
+  }
+}
+
 async function pickCandidate(i: number) {
-  selectedCandidate.value = i
   const c = candidates.value[i]
   if (!c) return
+  const seq = ++resultSeq
+  selectedCandidate.value = i
   scraping.value = true
+  error.value = ''
+  stepScrape.value = 0
+  stepTranslate.value = 0
   store.movie = null
   try {
-    const m = await doScrape(query.value.trim(), c.provider, c.id)
-    if (m && (m.title?.trim() || m.summary?.trim())) {
-      try {
-        const r = await translate.run(m.title, m.summary)
-        if (r.title) m.title = r.title
-        if (r.summary) m.summary = r.summary
-      } catch { /* LLM not configured */ }
-    }
+    await scrapeAndTranslate(store.query, c.provider, c.id, seq)
   } finally {
-    scraping.value = false
+    if (seq === resultSeq) scraping.value = false
   }
 }
 
@@ -92,6 +108,13 @@ onMounted(() => {
 // Monotonic sequence so a slow earlier search can't overwrite a newer one's
 // results (fast repeat searches used to race).
 let searchSeq = 0
+let resultSeq = 0
+let trailerRequest: AbortController | null = null
+onUnmounted(() => {
+  ++searchSeq
+  ++resultSeq
+  trailerRequest?.abort()
+})
 
 // Group stored magnets by their source so they render in the same per-source
 // tabs a fresh network search produces.
@@ -109,6 +132,10 @@ async function search() {
   const q = query.value.trim()
   if (!q) return
   const seq = ++searchSeq
+  const resultToken = ++resultSeq
+  trailerRequest?.abort()
+  trailerRequest = new AbortController()
+  const trailerSignal = trailerRequest.signal
   error.value = ''
   needsConfig.value = false
   store.query = q
@@ -118,6 +145,7 @@ async function search() {
   ingestMsg.value = ''
   trailerUrl.value = ''
   candidates.value = []
+  selectedCandidate.value = 0
   stepScrape.value = 0
   stepMagnet.value = 0
   stepTrailer.value = 0
@@ -135,6 +163,7 @@ async function search() {
   // First, fetch all candidates so the user can pick if there are multiple.
   const scrapeP = (async () => {
     if (stored) {
+      if (resultToken !== resultSeq) return
       store.movie = stored
       stepScrape.value = 1
       stepTranslate.value = 1 // 库内数据已是入库时处理过的内容
@@ -147,32 +176,12 @@ async function search() {
           stepScrape.value = -1
           return
         }
-        const m = list.length === 1
-          ? await doScrape(q, list[0].provider, list[0].id, seq)
-          : (candidates.value = list, await doScrape(q, list[0].provider, list[0].id, seq))
-        if (seq !== searchSeq) return
-        stepScrape.value = 1
-        if (m) {
-          if (m.title?.trim() || m.summary?.trim()) {
-            try {
-              const r = await translate.run(m.title, m.summary)
-              if (seq !== searchSeq) return
-              if (r.title) m.title = r.title
-              if (r.summary) m.summary = r.summary
-              stepTranslate.value = 1
-            } catch {
-              stepTranslate.value = -1
-            }
-          } else {
-            // 元数据为空 — 没有可翻译的内容，跳过翻译。
-            stepTranslate.value = 1
-          }
-        } else {
-          stepTranslate.value = -1
-        }
+        if (resultToken !== resultSeq) return
+        if (list.length > 1) candidates.value = list
+        await scrapeAndTranslate(q, list[0].provider, list[0].id, resultToken)
       })
       .catch((e) => {
-        if (seq !== searchSeq) return
+        if (seq !== searchSeq || resultToken !== resultSeq) return
         stepScrape.value = -1
         if (e instanceof MetatubeError && e.needsConfig) {
           needsConfig.value = true
@@ -203,7 +212,7 @@ async function search() {
         trailerUrl.value = store.trailerUrl = u
         stepTrailer.value = 1
       })
-    : metatube.findTrailer(q)
+    : metatube.findTrailer(q, trailerSignal)
       .then((tr) => {
         if (seq !== searchSeq) return
         trailerUrl.value = store.trailerUrl = tr.ok && tr.url ? tr.url : ''
@@ -213,7 +222,7 @@ async function search() {
 
   await Promise.allSettled([scrapeP, magP, trailerP])
   if (seq !== searchSeq) return
-  scraping.value = false
+  if (resultToken === resultSeq) scraping.value = false
   magLoading.value = false
   store.lastSearchAt = Date.now()
 }

@@ -2,6 +2,9 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import UnoCSS from 'unocss/vite'
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
+
+const { version: appVersion } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 
 // During `vite dev` (no Tauri), the worker runs separately on a fixed port.
 // Set VITE_DEV_WORKER_PORT to match, or default to 1375.
@@ -23,6 +26,7 @@ export default defineConfig({
     watch: { ignored: ['**/src-tauri/target/**', '**/worker/bin/**', '**/worker/obj/**', '**/Javideo-app/**', '**/.tmp/**'] },
   },
   define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
     __DEV_WORKER_BASE__: JSON.stringify(devWorkerBase),
   },
   build: {

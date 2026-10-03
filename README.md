@@ -2,10 +2,18 @@
 
 本地番号影片刮削、磁力搜索、媒体库管理与字幕下载工具（Windows 桌面软件）。
 
-![status](https://img.shields.io/badge/status-v2.0.2-green)
+![status](https://img.shields.io/badge/status-v2.0.3-green)
 ![platform](https://img.shields.io/badge/platform-Windows-blue)
 
 ---
+
+## v2.0.3 搜索修复
+
+- 修复连续搜索和预告播放期间的临时缓存冲突，重复搜索复用已下载的预告
+- 新搜索会取消旧预告请求，避免旧下载继续占用连接
+- 修复翻译完成后切换候选结果时译文不刷新，切换结果重新显示翻译进度
+- 防止旧刮削或翻译请求覆盖新结果
+- 版本号移至窗口右下角，并随发布版本自动更新，移除设置页的旧版本区
 
 ## v2.0.2 界面更新
 
@@ -105,7 +113,7 @@
 ## 快速开始
 
 1. 前往 [Releases](https://github.com/CowanNath/Javideo/releases) 下载最新版
-2. 下载并运行 `Javideo_2.0.2_x64-setup.exe` 完成安装（已有用户可覆盖升级）
+2. 下载并运行 `Javideo_2.0.3_x64-setup.exe` 完成安装（已有用户可覆盖升级）
 3. 从桌面快捷方式启动 Javideo
 4. 首次使用前往「设置 → MetaTube」配置刮削服务地址
 5. 在「设置 → 媒体库」新建媒体库

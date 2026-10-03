@@ -315,14 +315,6 @@ async function onDelete(id: number) {
       </div>
     </SettingSection>
 
-    <!-- 关于 -->
-    <SettingSection :title="t('about')" :desc="t('aboutDesc')">
-      <p class="text-[13px] text-text-soft">
-        Javideo v0.1.0 ·
-        <a class="text-primary hover:underline" href="https://github.com/metatube-community/metatube-sdk-go" target="_blank">MetaTube</a>
-      </p>
-    </SettingSection>
-
     <!-- 导入导出 -->
     <SettingSection :title="t('importExport')" :desc="t('importExportDesc')">
       <div class="flex gap-2">

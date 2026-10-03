@@ -78,16 +78,56 @@ public sealed class TrailerClient
     public TrailerClient(SettingsService settings) => _settings = settings;
 
     /// <summary>Temp dir for search-time trailer downloads (moved to library
-    /// folder on ingest, or deleted on next search).</summary>
+    /// folder on ingest, or expired after a day).</summary>
     private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "javideo-trailers");
 
     public static string TempPathFor(string fanHao) =>
         Path.Combine(TempDir, $"{fanHao.ToUpperInvariant()}.mp4");
 
-    /// <summary>Delete old temp trailers (called before a new search).</summary>
-    public static void CleanupTemp()
+    // Serialize preview writes; another request must never see a partial download.
+    private readonly SemaphoreSlim _previewGate = new(1, 1);
+
+    public async Task<string?> GetPreviewAsync(string number, CancellationToken ct = default)
     {
-        try { if (Directory.Exists(TempDir)) Directory.Delete(TempDir, recursive: true); } catch {}
+        await _previewGate.WaitAsync(ct);
+        try
+        {
+            var path = TempPathFor(number);
+            if (File.Exists(path) && new FileInfo(path).Length > 0)
+            {
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+                return path;
+            }
+            Directory.CreateDirectory(TempDir);
+            // Keep recent previews for repeat searches and playback. A locked
+            // expired file can be cleaned up on a later request.
+            foreach (var file in Directory.GetFiles(TempDir, "*.mp4"))
+            {
+                if (file.Equals(path, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddDays(-1)) File.Delete(file);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            var url = await FindTrailerUrlAsync(number, ct);
+            if (url == null) return null;
+            var bytes = await DownloadAsync(url, ct);
+            if (bytes == null || bytes.Length == 0) return null;
+            var partial = path + "." + Guid.NewGuid().ToString("N") + ".part";
+            try
+            {
+                await File.WriteAllBytesAsync(partial, bytes, ct);
+                File.Move(partial, path, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(partial)) File.Delete(partial);
+            }
+            return path;
+        }
+        finally { _previewGate.Release(); }
     }
 
     /// <summary>Find an existing temp trailer matching the fanHao case-insensitively,
@@ -128,7 +168,7 @@ public sealed class TrailerClient
     /// <summary>Find the first working trailer URL for a 番号, or null.
     /// Tries each candidate sequentially with retries — concurrent probing was
     /// unreliable through proxies (connection reset / 403 race conditions).</summary>
-    public async Task<string?> FindTrailerUrlAsync(string fanHao)
+    public async Task<string?> FindTrailerUrlAsync(string fanHao, CancellationToken ct = default)
     {
         var parsed = ParseFanHao(fanHao);
         if (parsed == null)
@@ -140,24 +180,25 @@ public sealed class TrailerClient
         var candidates = GenerateUrls(label, number, suffix);
         Serilog.Log.Information("TrailerClient: trying {Count} URLs for {FanHao}", candidates.Count, fanHao);
 
-        foreach (var url in candidates)
+        using var http = CreateClient(TimeSpan.FromSeconds(15));
+        foreach (var url in candidates.Distinct())
         {
             for (int attempt = 1; attempt <= 2; attempt++)
             {
                 try
                 {
-                    using var http = CreateClient(TimeSpan.FromSeconds(15));
-                    var req = new HttpRequestMessage(HttpMethod.Get, url);
+                    using var req = new HttpRequestMessage(HttpMethod.Get, url);
                     req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
-                    using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+                    using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
                     Serilog.Log.Information("TrailerClient: {Url} -> {Status} (attempt {N})", url, (int)resp.StatusCode, attempt);
                     if (resp.IsSuccessStatusCode) return url;
                     break; // 4xx/5xx — no point retrying the same URL
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     Serilog.Log.Warning("TrailerClient: {Url} -> exception (attempt {N}): {Msg}", url, attempt, ex.Message);
-                    if (attempt < 2) await Task.Delay(1000);
+                    if (attempt < 2) await Task.Delay(1000, ct);
                 }
             }
         }
@@ -206,19 +247,20 @@ public sealed class TrailerClient
 
     /// <summary>Download the trailer bytes via the proxy-aware client, with
     /// up to 3 retries (network/proxy can be flaky).</summary>
-    public async Task<byte[]?> DownloadAsync(string url)
+    public async Task<byte[]?> DownloadAsync(string url, CancellationToken ct = default)
     {
+        using var http = CreateClient(TimeSpan.FromSeconds(90));
         for (int attempt = 1; attempt <= 3; attempt++)
         {
             try
             {
-                using var http = CreateClient(TimeSpan.FromSeconds(90));
-                return await http.GetByteArrayAsync(url);
+                return await http.GetByteArrayAsync(url, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 Serilog.Log.Warning(ex, "Trailer download attempt {N}/3 failed for {Url}", attempt, url);
-                if (attempt < 3) await Task.Delay(1000 * attempt); // backoff 1s, 2s
+                if (attempt < 3) await Task.Delay(1000 * attempt, ct); // backoff 1s, 2s
             }
         }
         return null;

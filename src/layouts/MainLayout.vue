@@ -6,6 +6,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { t } from '@/utils/i18n'
 import { useMovieDetail } from '@/utils/movieDetail'
 
+const appVersion = __APP_VERSION__
 const route = useRoute()
 const { drawerOpen } = useMovieDetail()
 const libs = useLibraryStore()
@@ -148,7 +149,7 @@ async function winAction(action: 'minimize' | 'maximize' | 'close') {
 
         <footer class="box-footer">
           <span><i />{{ t('footerLocal') }}</span>
-          <span>Javideo</span>
+          <span>Javideo v{{ appVersion }}</span>
         </footer>
       </section>
     </div>

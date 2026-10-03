@@ -19,3 +19,7 @@ Javideo-app/
 
 # local agent state
 .mimosa/
+
+# regression-check build output
+scripts/trailer-checks/bin/
+scripts/trailer-checks/obj/

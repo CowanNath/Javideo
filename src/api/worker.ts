@@ -228,8 +228,8 @@ export const metatube = {
     throw new MetatubeError(detail, needsConfig)
   },
   test: () => req<{ ok: boolean; detail: string }>('/api/metatube/test'),
-  findTrailer: async (number: string): Promise<{ ok: boolean; url: string | null }> => {
-    const res = await req<{ ok: boolean; url: string | null }>(`/api/metatube/trailer/${encodeURIComponent(number)}`)
+  findTrailer: async (number: string, signal?: AbortSignal): Promise<{ ok: boolean; url: string | null }> => {
+    const res = await req<{ ok: boolean; url: string | null }>(`/api/metatube/trailer/${encodeURIComponent(number)}`, { signal })
     // Backend returns a relative path like "/api/metatube/trailer-temp/XXX"
     // — hydrate to absolute for <video src>.
     if (res.ok && res.url && res.url.startsWith('/')) {
