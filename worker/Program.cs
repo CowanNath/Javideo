@@ -47,6 +47,7 @@ try
     builder.Services.AddSingleton<PlayerService>();
     builder.Services.AddSingleton<TrailerClient>();
     builder.Services.AddSingleton<BackupService>();
+    builder.Services.AddSingleton<HighlightService>();
     builder.Services.AddHttpClient<AvatarService>();
     builder.Services.AddHttpClient<PreviewImageService>();
     builder.Services.AddSingleton<TranslationService>();
@@ -78,6 +79,7 @@ try
     app.MapHealthEndpoints();
     app.MapLibraryEndpoints();
     app.MapMovieEndpoints();
+    app.MapHighlightEndpoints();
     app.MapMetaTubeEndpoints();
     app.MapMagnetEndpoints();
     app.MapSubtitleEndpoints();

@@ -89,6 +89,34 @@ export interface Movie {
 
 export type FavoriteTarget = 'movie' | 'tag' | 'actor'
 
+export interface MovieHighlightAsset {
+  id: number
+  highlightId: number
+  kind: 'image' | 'video'
+  originalName: string
+  url: string
+}
+
+export interface MovieHighlight {
+  id: number
+  movieId: number
+  title?: string | null
+  note?: string | null
+  startSeconds?: number | null
+  endSeconds?: number | null
+  sourceFileName?: string | null
+  assets: MovieHighlightAsset[]
+}
+
+export interface SaveHighlightRequest {
+  title: string
+  note: string
+  startSeconds: number | null
+  endSeconds: number | null
+  sourceFileName: string
+  keepAssetIds: number[]
+}
+
 export interface SubtitleItem {
   url: string
   ext: string

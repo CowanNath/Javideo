@@ -1,22 +1,31 @@
 using System.IO.Compression;
 using Javideo.Worker.Db;
 using Microsoft.Data.Sqlite;
+using Dapper;
 
 namespace Javideo.Worker.Services;
 
 /// <summary>
 /// Backup / restore of all user data: the SQLite database, cached actor
-/// avatars (actors/) and cached preview images (previews/). Uses the standard
+/// avatars (actors/), preview images (previews/) and highlights. Uses the standard
 /// library ZipFile — no third-party dependency.
 /// </summary>
 public sealed class BackupService
 {
     private readonly DbConnectionFactory _db;
-    public BackupService(DbConnectionFactory db) => _db = db;
+    private readonly HighlightService _highlights;
+    public BackupService(DbConnectionFactory db, HighlightService highlights) { _db = db; _highlights = highlights; }
 
     /// <summary>Export all user data to a temp zip file and return its path.
     /// The caller (endpoint) streams it to the client and deletes the temp.</summary>
     public string Export()
+    {
+        _highlights.MutationGate.Wait();
+        try { return ExportCore(); }
+        finally { _highlights.MutationGate.Release(); }
+    }
+
+    private string ExportCore()
     {
         // Unique name — two exports in the same second must not fight over the
         // same file while one of them is still being streamed.
@@ -52,7 +61,10 @@ public sealed class BackupService
         var previewsDir = Path.Combine(_db.DataDir, "previews");
         AddDirectory(archive, previewsDir, "previews/");
 
-        // 4. Settings are inside library.db, no separate file needed.
+        // 4. User-owned highlight attachments, including imported clips.
+        AddDirectory(archive, _highlights.DirectoryPath, "highlights/");
+
+        // Settings are inside library.db, no separate file needed.
 
         return tempZip;
     }
@@ -61,6 +73,13 @@ public sealed class BackupService
     /// into the data directory. Existing files are overwritten. The caller
     /// should restart the worker afterwards so the DB reconnects.</summary>
     public void Import(string zipPath)
+    {
+        _highlights.MutationGate.Wait();
+        try { ImportCore(zipPath); }
+        finally { _highlights.MutationGate.Release(); }
+    }
+
+    private void ImportCore(string zipPath)
     {
         if (!File.Exists(zipPath))
             throw new FileNotFoundException("备份文件不存在");
@@ -78,21 +97,60 @@ public sealed class BackupService
             if (!IsSqliteFile(srcDb))
                 throw new InvalidDataException("备份文件无效:library.db 不是有效的 SQLite 数据库");
 
-            // Close pooled connections so no open handle corrupts the copy,
-            // and keep a one-shot backup of the current db — import overwrites
-            // everything, this is the only way back.
-            SqliteConnection.ClearAllPools();
-            if (File.Exists(_db.DbPath))
-                File.Copy(_db.DbPath, _db.DbPath + ".bak", overwrite: true);
-            File.Copy(srcDb, _db.DbPath, overwrite: true);
+            ValidateHighlightFiles(srcDb, staging);
 
-            // Move actors/ and previews/ directories.
-            CopyDirOverwrite(Path.Combine(staging, "actors"), _db.AvatarsDir);
-            CopyDirOverwrite(Path.Combine(staging, "previews"), Path.Combine(_db.DataDir, "previews"));
+            // Keep a full, consistent recovery copy: a DB-only .bak cannot
+            // recover user attachments overwritten by importing another backup.
+            var snapshot = ExportCore();
+            var previousBackup = Path.Combine(_db.DataDir, $"before-import-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.zip");
+            File.Move(snapshot, previousBackup);
+
+            try { RestoreFiles(staging); }
+            catch
+            {
+                var rollback = Path.Combine(staging, "rollback");
+                try
+                {
+                    ZipFile.ExtractToDirectory(previousBackup, rollback);
+                    RestoreFiles(rollback);
+                }
+                catch (Exception ex)
+                {
+                    throw new IOException($"导入失败且自动恢复未完成，原数据完整备份保存在 {previousBackup}", ex);
+                }
+                throw;
+            }
         }
         finally
         {
             if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+        }
+    }
+
+    private void RestoreFiles(string staging)
+    {
+        // Copy attachments first: interrupted writes cannot install a DB
+        // whose newly referenced highlight files have not arrived yet.
+        CopyDirOverwrite(Path.Combine(staging, "actors"), _db.AvatarsDir);
+        CopyDirOverwrite(Path.Combine(staging, "previews"), Path.Combine(_db.DataDir, "previews"));
+        CopyDirOverwrite(Path.Combine(staging, "highlights"), _highlights.DirectoryPath);
+        // The complete before-import ZIP is the recovery copy, including files.
+        SqliteConnection.ClearAllPools();
+        File.Copy(Path.Combine(staging, "library.db"), _db.DbPath, overwrite: true);
+    }
+
+    private static void ValidateHighlightFiles(string dbPath, string staging)
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+        conn.Open();
+        if (conn.ExecuteScalar<string>("PRAGMA quick_check") != "ok")
+            throw new InvalidDataException("备份数据库损坏。");
+        if (!conn.ExecuteScalar<bool>("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='movie_highlight_assets')")) return;
+        foreach (var asset in conn.Query<(long MovieId, string Name)>("SELECT movie_id, storage_name FROM movie_highlight_assets"))
+        {
+            if (asset.MovieId <= 0 || !HighlightService.IsStorageName(asset.Name) ||
+                !File.Exists(Path.Combine(staging, "highlights", asset.MovieId.ToString(), asset.Name)))
+                throw new InvalidDataException("备份文件无效：精彩记录附件缺失或路径非法。");
         }
     }
 

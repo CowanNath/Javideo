@@ -80,7 +80,6 @@ async function winAction(action: 'minimize' | 'maximize' | 'close') {
             <span class="i-carbon-settings nav-glyph" />
             <span class="nav-caption">{{ t('settings') }}</span>
           </RouterLink>
-          <span class="status-dot" :title="t('workerRunning')" />
         </div>
       </aside>
 
@@ -148,7 +147,6 @@ async function winAction(action: 'minimize' | 'maximize' | 'close') {
         </div>
 
         <footer class="box-footer">
-          <span><i />{{ t('footerLocal') }}</span>
           <span>Javideo v{{ appVersion }}</span>
         </footer>
       </section>

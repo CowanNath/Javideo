@@ -124,13 +124,6 @@ a, button { transition: background 0.18s, color 0.18s, border-color 0.18s, trans
 .nav-glyph { font-size: 20px; }
 .nav-caption { font-size: 9px; letter-spacing: 1px; }
 .sidebar-bottom { display: flex; flex-direction: column; align-items: center; gap: 12px; }
-.status-dot {
-  width: 5px;
-  height: 5px;
-  background: var(--status-green);
-  border-radius: 50%;
-  box-shadow: 0 0 9px color-mix(in srgb, var(--status-green) 40%, transparent);
-}
 
 /* 分离内容面板：标题栏 + 滚动区 + 页脚。 */
 .box-panel {
@@ -289,7 +282,7 @@ a, button { transition: background 0.18s, color 0.18s, border-color 0.18s, trans
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 0 26px;
   background: var(--box-footer);
   border-top: 1px solid var(--box-hairline);
@@ -297,8 +290,6 @@ a, button { transition: background 0.18s, color 0.18s, border-color 0.18s, trans
   font-size: 9px;
   letter-spacing: 0.5px;
 }
-.box-footer > span:first-child { display: flex; align-items: center; gap: 6px; }
-.box-footer i { width: 4px; height: 4px; background: var(--status-green); border-radius: 50%; }
 .box-footer b { font-weight: 400; color: var(--primary); margin: 0 6px; }
 
 /* 影片网格密度：跟随 C-Box 的 3/4 列节奏（覆盖内联 auto-fill）。 */

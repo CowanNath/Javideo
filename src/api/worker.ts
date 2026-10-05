@@ -201,6 +201,30 @@ export const movies = {
     }),
 }
 
+// ---- Highlights ----
+export const highlights = {
+  list: (movieId: number, signal?: AbortSignal) =>
+    req<import('../types').MovieHighlight[]>(`/api/movies/${movieId}/highlights`, { signal }),
+  videoFiles: (movieId: number) => req<string[]>(`/api/movies/${movieId}/highlights/video-files`),
+  save: async (movieId: number, id: number | null, metadata: import('../types').SaveHighlightRequest, files: File[]) => {
+    const form = new FormData()
+    form.append('metadata', JSON.stringify(metadata))
+    files.forEach(file => form.append('files', file))
+    const response = await fetch(`${await getBaseUrl()}/api/movies/${movieId}/highlights${id == null ? '' : `/${id}`}`, {
+      method: id == null ? 'POST' : 'PUT', body: form,
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => null)
+      throw new Error(error?.detail || `${response.status} ${response.statusText}`)
+    }
+    return response.json() as Promise<import('../types').MovieHighlight>
+  },
+  remove: (movieId: number, id: number) => req<void>(`/api/movies/${movieId}/highlights/${id}`, { method: 'DELETE' }),
+  assetUrl: async (asset: import('../types').MovieHighlightAsset) => `${await getBaseUrl()}${asset.url}`,
+  playAsset: (movieId: number, id: number, assetId: number) =>
+    req<{ ok: boolean; detail: string }>(`/api/movies/${movieId}/highlights/${id}/assets/${assetId}/play`, { method: 'POST' }),
+}
+
 // ---- MetaTube scraping ----
 export class MetatubeError extends Error {
   needsConfig: boolean

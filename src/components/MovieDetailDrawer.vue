@@ -8,6 +8,7 @@ import { useLibraryStore } from '@/stores/libraries'
 import { confirmDialog } from '@/utils/confirm'
 import { toast } from '@/utils/toast'
 import { t as ti } from '@/utils/i18n'
+import MovieHighlights from '@/components/MovieHighlights.vue'
 
 const props = defineProps<{ modelValue: boolean; movieId: number | null }>()
 const emit = defineEmits<{
@@ -20,6 +21,14 @@ const favs = useFavoritesStore()
 const libs = useLibraryStore()
 favs.ensureLoaded('movie')
 const detailPanel = ref<HTMLElement | null>(null)
+const highlightsPanel = ref<InstanceType<typeof MovieHighlights> | null>(null)
+// Guard sidebar, Back/Forward and switching movies as well as close buttons.
+const stopHighlightsGuard = router.beforeEach(async (to, from) => {
+  if (props.modelValue && to.fullPath !== from.fullPath)
+    return await highlightsPanel.value?.beforeLeave() ?? true
+  return true
+})
+onUnmounted(stopHighlightsGuard)
 let returnFocus: HTMLElement | null = null
 
 // Reactive favorite state for the heart (computed → dependency tracked).
@@ -86,8 +95,9 @@ function openPreview(i: number) {
 
 // Escape closes the lightbox first, then the drawer (separate handlers handle
 // the lightbox; we only close the drawer when it isn't open).
-function onDrawerKeydown(e: KeyboardEvent) {
+async function onDrawerKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && previewIdx.value == null) {
+    if (await highlightsPanel.value?.handleEscape()) return
     if (showSubtitles.value) showSubtitles.value = false
     else if (showRescrapePicker.value) showRescrapePicker.value = false
     else if (showTrailer.value) stopTrailer()
@@ -119,7 +129,10 @@ function trailerFailed() {
 const actionMsg = ref('')
 const actionErr = ref(false)
 
-function close() { emit('update:modelValue', false) }
+async function close() {
+  if (await highlightsPanel.value?.beforeLeave() === false) return
+  emit('update:modelValue', false)
+}
 
 let detailLoadSeq = 0
 async function load() {
@@ -175,6 +188,7 @@ async function play() {
 
 async function remove() {
   if (!movie.value?.id) return
+  if (await highlightsPanel.value?.beforeLeave() === false) return
   if (!await confirmDialog(ti('deleteConfirm'), ti('deleteMovie'))) return
   busy.value = true
   try {
@@ -195,6 +209,7 @@ const showRescrapePicker = ref(false)
 
 async function rescrape() {
   if (!movie.value?.id || !movie.value.number) return
+  if (await highlightsPanel.value?.beforeLeave() === false) return
   busy.value = true; actionMsg.value = ti('scraping'); actionErr.value = false
   try {
     // First fetch candidates — if multiple, show picker.
@@ -639,6 +654,7 @@ function formatDiff(sec: number): string {
               :class="actionErr ? 'text-red-400' : 'text-status-green'"
             >{{ actionMsg }}</p>
           </div>
+          <MovieHighlights v-if="movie.id" :key="movie.id" ref="highlightsPanel" :movie-id="movie.id" :disabled="busy || showRescrapePicker" @preview="stopTrailer" />
         </div>
         <p v-else-if="actionMsg" class="p-12 text-center text-red-400" role="alert">{{ actionMsg }}</p>
       </section>

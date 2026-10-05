@@ -74,6 +74,36 @@ public static class DbInitializer
         // the video stays on the cloud drive while metadata is cached locally).
         try { await conn.ExecuteAsync("ALTER TABLE movies ADD COLUMN source_path TEXT;"); } catch { }
 
+        // User highlights are never rebuilt by scraping.
+        await conn.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS movie_highlights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                movie_id INTEGER NOT NULL,
+                title TEXT,
+                note TEXT,
+                start_seconds INTEGER CHECK(start_seconds IS NULL OR start_seconds BETWEEN 0 AND 359999),
+                end_seconds INTEGER CHECK(end_seconds IS NULL OR (start_seconds IS NOT NULL AND end_seconds > start_seconds AND end_seconds <= 359999)),
+                source_file_name TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (movie_id) REFERENCES movies(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_highlights_movie ON movie_highlights(movie_id);
+            CREATE TABLE IF NOT EXISTS movie_highlight_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                movie_id INTEGER NOT NULL,
+                highlight_id INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('image','video')),
+                original_name TEXT NOT NULL,
+                storage_name TEXT NOT NULL UNIQUE,
+                content_type TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (movie_id) REFERENCES movies(id) ON DELETE CASCADE,
+                FOREIGN KEY (highlight_id) REFERENCES movie_highlights(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_highlight_assets_movie ON movie_highlight_assets(movie_id,highlight_id);
+            """);
+
         // Actors.
         await conn.ExecuteAsync("""
             CREATE TABLE IF NOT EXISTS actors (

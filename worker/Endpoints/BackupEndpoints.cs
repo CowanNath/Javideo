@@ -1,4 +1,5 @@
 using Javideo.Worker.Services;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace Javideo.Worker.Endpoints;
 
@@ -42,7 +43,11 @@ public static class BackupEndpoints
         // Import a zip (multipart form upload, field name "file").
         g.MapPost("/import", async (HttpContext ctx, BackupService backup) =>
         {
-            var form = await ctx.Request.ReadFormAsync(ctx.RequestAborted);
+            // Backups can contain multiple imported clips. Lift limits only
+            // for this local, user-selected backup upload, not all endpoints.
+            if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+                limit.MaxRequestBodySize = null;
+            var form = await ctx.Request.ReadFormAsync(new FormOptions { MultipartBodyLengthLimit = long.MaxValue }, ctx.RequestAborted);
             var file = form.Files.FirstOrDefault();
             if (file == null || file.Length == 0)
                 return Results.BadRequest(new { ok = false, detail = "未提供文件" });

@@ -405,24 +405,33 @@ public static class MovieEndpoints
             return Results.Ok(res);
         });
 
-        g.MapDelete("/{id:long}", async (long id, DbConnectionFactory db, bool removeFiles = false) =>
+        g.MapDelete("/{id:long}", async (long id, DbConnectionFactory db, HighlightService highlights, bool removeFiles = false) =>
         {
-            await using var c = db.Create();
-            await c.OpenAsync();
-            var folder = await c.ExecuteScalarAsync<string?>(
-                "SELECT folder_path FROM movies WHERE id=@id", new { id });
-            // Cascade: remove the movie row and any favorite pointing at it,
-            // so the favorites list never shows a deleted movie.
-            await c.ExecuteAsync("DELETE FROM movies WHERE id=@id", new { id });
-            await c.ExecuteAsync(
-                "DELETE FROM favorites WHERE target_type='movie' AND target_id=@id", new { id });
-            // Optionally wipe the generated folder (nfo/poster/thumb/magnet.txt).
-            if (removeFiles && !string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
+            await highlights.MutationGate.WaitAsync();
+            try
             {
-                try { Directory.Delete(folder, recursive: true); }
-                catch { /* best-effort */ }
+                await using var c = db.Create();
+                await c.OpenAsync();
+                await using var tx = c.BeginTransaction();
+                var folder = await c.ExecuteScalarAsync<string?>(
+                    "SELECT folder_path FROM movies WHERE id=@id", new { id }, tx);
+                // Explicit cleanup also works for legacy databases with foreign keys disabled.
+                await c.ExecuteAsync("DELETE FROM movie_highlight_assets WHERE movie_id=@id", new { id }, tx);
+                await c.ExecuteAsync("DELETE FROM movie_highlights WHERE movie_id=@id", new { id }, tx);
+                await c.ExecuteAsync("DELETE FROM movies WHERE id=@id", new { id }, tx);
+                await c.ExecuteAsync(
+                    "DELETE FROM favorites WHERE target_type='movie' AND target_id=@id", new { id }, tx);
+                tx.Commit();
+                highlights.RemoveMovieFiles(id);
+                // Optionally wipe the generated folder (nfo/poster/thumb/magnet.txt).
+                if (removeFiles && !string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
+                {
+                    try { Directory.Delete(folder, recursive: true); }
+                    catch { /* best-effort */ }
+                }
+                return Results.NoContent();
             }
-            return Results.NoContent();
+            finally { highlights.MutationGate.Release(); }
         });
 
         // Re-scrape an existing movie: re-fetch metadata from MetaTube, translate,
