@@ -126,18 +126,22 @@ const allStats = computed(() => {
 })
 
 let loadSeq = 0
+let loadController: AbortController | null = null
+onUnmounted(() => { loadSeq++; loadController?.abort() })
 async function load() {
   const seq = ++loadSeq
+  loadController?.abort()
+  const controller = loadController = new AbortController()
   loading.value = true
   try {
     if (isAll.value) {
-      const list = (await moviesApi.all()) ?? []
+      const list = (await moviesApi.all(controller.signal)) ?? []
       if (seq !== loadSeq) return
       movies.value = list
     } else {
       const id = libId()
       if (!Number.isFinite(id)) return   // route param not ready yet — avoid library/NaN
-      const list = (await moviesApi.byLibrary(id)) ?? []
+      const list = (await moviesApi.byLibrary(id, controller.signal)) ?? []
       if (seq !== loadSeq) return
       movies.value = list
       await favs.load('movie')
@@ -191,6 +195,7 @@ async function ingestAll() {
 // Reload the grid as tasks finish so freshly ingested movies appear (and
 // multi-part rows flip to ✅).
 watch(() => ingest.finished, () => { load() })
+watch(() => libs.items.map(lib => `${lib.id}:${lib.cacheStatus?.state ?? ''}`).join(','), () => { load() })
 
 onMounted(() => { favs.load('movie'); load() })
 watch(() => route.params.id, () => {

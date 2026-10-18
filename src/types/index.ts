@@ -5,6 +5,17 @@ export interface Library {
   directories: string[]
   movieCount?: number
   cacheLocal?: boolean
+  cacheStatus?: LibraryCacheStatus | null
+}
+
+export interface LibraryCacheStatus {
+  state: 'queued' | 'scanning' | 'caching' | 'completed' | 'failed'
+  totalFiles: number
+  doneFiles: number
+  skippedFiles: number
+  failedFiles: number
+  bytesCopied: number
+  lastError?: string | null
 }
 
 export interface Actor {

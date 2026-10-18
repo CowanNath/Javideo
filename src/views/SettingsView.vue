@@ -10,6 +10,7 @@ import { confirmDialog } from '@/utils/confirm'
 import { toast } from '@/utils/toast'
 import { t, setLang, type Lang } from '@/utils/i18n'
 import { backup } from '@/api/worker'
+import type { LibraryCacheStatus } from '@/types'
 
 const importInput = ref<HTMLInputElement | null>(null)
 const importMsg = ref('')
@@ -190,12 +191,22 @@ async function onSave(lib: any) {
   try {
     if (editingLib.value) await libs.update(editingLib.value.id, lib)
     else await libs.create(lib)
+    if (lib.cacheLocal) toast(t('cacheQueued'), 'info')
   } catch (e: any) {
     toast(t('saveFail') + ': ' + e.message, 'error')
   }
 }
 async function onDelete(id: number) {
   if (await confirmDialog(t('deleteLibConfirm'), t('deleteLib'))) await libs.remove(id)
+}
+function cacheLabel(status: LibraryCacheStatus) {
+  if (status.state === 'caching') return t('cacheCopying', { done: status.doneFiles, total: status.totalFiles })
+  if (status.state === 'completed') return t('cacheComplete', { total: status.doneFiles, skipped: status.skippedFiles })
+  return t(status.state === 'failed' ? 'cacheFailed' : status.state === 'scanning' ? 'cacheScanning' : 'cacheQueued')
+}
+async function retryCache(id: number) {
+  try { await libs.retryCache(id); toast(t('cacheQueued'), 'info') }
+  catch (e: any) { toast(t('saveFail') + ': ' + e.message, 'error') }
 }
 </script>
 
@@ -219,11 +230,17 @@ async function onDelete(id: number) {
           <div class="min-w-0">
             <div class="font-medium text-[14px] truncate">{{ lib.name }}</div>
             <div class="text-[11px] text-muted truncate">{{ lib.movieCount ?? 0 }} · {{ lib.directories.join('; ') }}</div>
+            <div v-if="lib.cacheLocal && lib.cacheStatus" class="text-[11px] text-muted mt-1" role="status" aria-live="polite">
+              <span>{{ cacheLabel(lib.cacheStatus) }}</span>
+              <progress v-if="lib.cacheStatus.state === 'caching' && lib.cacheStatus.totalFiles" class="block w-full h-1 mt-1" :aria-label="t('cacheLocal')" :value="lib.cacheStatus.doneFiles" :max="lib.cacheStatus.totalFiles" />
+              <span v-if="lib.cacheStatus.state === 'failed'" class="block text-red-400 break-all">{{ lib.cacheStatus.lastError }}</span>
+              <button v-if="lib.cacheStatus.state === 'failed'" class="underline mt-1" @click="retryCache(lib.id)">{{ t('retry') }}</button>
+            </div>
           </div>
         </div>
         <div class="flex gap-1 shrink-0">
-          <button class="btn-ghost !px-2" @click="openEdit(lib)"><span class="i-carbon-edit" /></button>
-          <button class="btn-ghost !px-2 hover:!text-red-500" @click="onDelete(lib.id)"><span class="i-carbon-trash-can" /></button>
+          <button class="btn-ghost !px-2" :aria-label="t('editLibTitle')" @click="openEdit(lib)"><span class="i-carbon-edit" /></button>
+          <button class="btn-ghost !px-2 hover:!text-red-500" :aria-label="t('deleteLib')" @click="onDelete(lib.id)"><span class="i-carbon-trash-can" /></button>
         </div>
       </div>
       <p v-if="!libs.items.length" class="text-[13px] text-muted py-2">{{ t('noLibsHint') }}</p>

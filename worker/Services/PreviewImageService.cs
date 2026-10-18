@@ -23,33 +23,40 @@ public sealed class PreviewImageService
 
     /// <summary>Download every preview URL into previews/{movieId}/{n}.jpg (n
     /// from 0) and return how many were cached. Existing files are kept.</summary>
-    public async Task<int> CacheAsync(long movieId, IEnumerable<string> urls)
+    public async Task<int> CacheAsync(long movieId, IEnumerable<string> urls, CancellationToken ct = default)
     {
         var dir = DirFor(movieId);
         Directory.CreateDirectory(dir);
         int n = 0, cached = 0;
         foreach (var url in urls)
         {
+            ct.ThrowIfCancellationRequested();
             var path = Path.Combine(dir, $"{n}.jpg");
-            if (!File.Exists(path))
+            if (!File.Exists(path) || new FileInfo(path).Length == 0)
             {
+                var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 try
                 {
-                    if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                    if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
                     {
-                        using var resp = await _http.GetAsync(uri);
+                        using var resp = await _http.GetAsync(uri, ct);
                         if (resp.IsSuccessStatusCode)
                         {
-                            await using var fs = File.Create(path);
-                            await resp.Content.CopyToAsync(fs);
-                            cached++;
+                            await using (var fs = File.Create(temp)) await resp.Content.CopyToAsync(fs, ct);
+                            if (new FileInfo(temp).Length > 0)
+                            {
+                                File.Move(temp, path, overwrite: true);
+                                cached++;
+                            }
                         }
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     Serilog.Log.Warning(ex, "Failed to cache preview {N} for movie {Id}", n, movieId);
                 }
+                finally { try { File.Delete(temp); } catch (IOException) { } }
             }
             else { cached++; }
             n++;

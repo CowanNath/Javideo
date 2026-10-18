@@ -36,26 +36,14 @@ public static class TagEndpoints
             await using var c = db.Create();
             await c.OpenAsync();
             var movies = (await c.QueryAsync<Movie>(@"
-                SELECT m.id Id, m.number Number, m.title Title, m.cover_url CoverUrl,
+                SELECT m.id Id, m.library_id LibraryId, m.number Number, m.title Title, m.cover_url CoverUrl,
                        m.thumb_url ThumbUrl, m.release_date ReleaseDate, m.folder_path FolderPath,
                        m.source_path SourcePath
                 FROM movies m
                 JOIN movie_tags mt ON mt.movie_id=m.id
                 WHERE mt.tag_id=@id
                 ORDER BY m.release_date DESC", new { id })).ToList();
-            // Local image endpoints, same reasoning as ActorEndpoints/movies —
-            // raw MetaTube URLs break whenever that server is unreachable.
-            foreach (var m in movies)
-            {
-                if (!string.IsNullOrWhiteSpace(m.CoverUrl))
-                    m.CoverUrl = $"/api/movies/{m.Id}/image/poster";
-                if (!string.IsNullOrWhiteSpace(m.ThumbUrl))
-                    m.ThumbUrl = $"/api/movies/{m.Id}/image/thumb";
-                // Card badges: video file present / trailer downloaded.
-                m.HasVideo = MovieEndpoints.HasVideoFile(m.FolderPath, m.Number ?? "", m.SourcePath);
-                m.HasTrailer = !string.IsNullOrWhiteSpace(m.FolderPath)
-                    && File.Exists(Path.Combine(m.FolderPath, $"{m.Number}-trailer.mp4"));
-            }
+            await MovieEndpoints.PrepareCardsAsync(movies, db);
             return Results.Ok(movies);
         });
 

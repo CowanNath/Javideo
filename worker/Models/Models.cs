@@ -10,7 +10,11 @@ public class Library
     /// <summary>Cloud-drive library: nfo/posters/trailers are cached locally,
     /// the cloud is only touched when playing a video.</summary>
     public bool CacheLocal { get; set; }
+    public LibraryCacheStatus? CacheStatus { get; set; }
 }
+
+public sealed record LibraryCacheStatus(string State, int TotalFiles = 0, int DoneFiles = 0,
+    int SkippedFiles = 0, int FailedFiles = 0, long BytesCopied = 0, string? LastError = null);
 
 public class Movie
 {

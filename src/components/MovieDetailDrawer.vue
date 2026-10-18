@@ -135,8 +135,11 @@ async function close() {
 }
 
 let detailLoadSeq = 0
+let detailController: AbortController | null = null
 async function load() {
   const seq = ++detailLoadSeq
+  detailController?.abort()
+  const controller = detailController = new AbortController()
   const id = props.movieId
   if (id == null) { movie.value = null; return }
   loading.value = true
@@ -144,19 +147,44 @@ async function load() {
   trailerSrc.value = ''
   actionMsg.value = ''
   try {
-    const result = await moviesApi.get(id)
+    const result = await moviesApi.get(id, controller.signal)
     if (seq !== detailLoadSeq || !props.modelValue) return
     movie.value = result
     const trailer = result.hasTrailer ? await moviesApi.trailerUrl(id) : ''
     if (seq !== detailLoadSeq || !props.modelValue) return
     trailerSrc.value = trailer
     showTrailer.value = false
+    if (!result.hasTrailer && result.folderPath)
+      void refreshTrailerStatus(id, seq, controller.signal)
   } catch (e: any) {
     if (seq === detailLoadSeq) {
       actionMsg.value = ti('loadFailed') + ': ' + e.message; actionErr.value = true
     }
   } finally { if (seq === detailLoadSeq) loading.value = false }
 }
+async function refreshTrailerStatus(id: number, seq: number, signal: AbortSignal) {
+  try {
+    const status = await moviesApi.trailerStatus(id, signal)
+    if (seq !== detailLoadSeq || !props.modelValue || !status.hasTrailer) return
+    const url = await moviesApi.trailerUrl(id)
+    if (seq !== detailLoadSeq || !props.modelValue) return
+    trailerSrc.value = url
+    if (movie.value) movie.value.hasTrailer = true
+  } catch { /* Optional cloud media must not hide the locally stored details. */ }
+}
+watch(() => libs.items.find(lib => lib.id === movie.value?.libraryId)?.cacheStatus?.state, async (state, previous) => {
+  if (!props.modelValue || !movie.value?.id || !previous || !['queued', 'scanning', 'caching'].includes(previous)
+    || (state !== 'completed' && state !== 'failed')) return
+  const id = movie.value.id, seq = detailLoadSeq
+  try {
+    const updated = await moviesApi.get(id, detailController?.signal)
+    if (seq !== detailLoadSeq || !props.modelValue || movie.value?.id !== id) return
+    Object.assign(movie.value, { coverUrl: updated.coverUrl, thumbUrl: updated.thumbUrl, previewImages: updated.previewImages,
+      folderPath: updated.folderPath, hasVideo: updated.hasVideo, hasTrailer: updated.hasTrailer })
+    if (previewIdx.value != null && previewIdx.value >= (updated.previewImages?.length ?? 0)) previewIdx.value = null
+    if (updated.hasTrailer) trailerSrc.value = await moviesApi.trailerUrl(id)
+  } catch { /* A later open retries; preserve the current details and any highlight edits. */ }
+})
 watch(() => [props.modelValue, props.movieId], async ([open]) => {
   // Keep the sidebar available while details are open.
   window.removeEventListener('keydown', onDrawerKeydown)
@@ -168,11 +196,14 @@ watch(() => [props.modelValue, props.movieId], async ([open]) => {
     await load()
   } else {
     detailLoadSeq++
+    detailController?.abort()
     if (returnFocus?.isConnected) returnFocus.focus()
     returnFocus = null
   }
 }, { immediate: true })
 onUnmounted(() => {
+  detailLoadSeq++
+  detailController?.abort()
   window.removeEventListener('keydown', onDrawerKeydown)
 })
 
@@ -516,7 +547,9 @@ function formatDiff(sec: number): string {
               :aria-label="ti('previewImage', { n: i + 1 })"
               @click="openPreview(i)"
             >
-              <img :src="img" :alt="ti('previewImage', { n: i + 1 })" class="h-36 w-auto object-cover block" referrerpolicy="no-referrer" loading="lazy" />
+              <!-- ponytail: cached screenshots are small; load them directly so
+                   WebView does not defer images inside the nested scroller. -->
+              <img :src="img" :alt="ti('previewImage', { n: i + 1 })" width="216" height="144" class="h-36 w-54 object-cover block" referrerpolicy="no-referrer" />
             </button>
           </div>
 

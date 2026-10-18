@@ -1,5 +1,6 @@
 using Dapper;
 using Javideo.Worker.Db;
+using Javideo.Worker.Models;
 
 namespace Javideo.Worker.Endpoints;
 
@@ -49,20 +50,20 @@ public static class FavoriteEndpoints
             };
             object param = t is "movie" or "actor" or "tag" ? new { } : new { t };
             var rows = (await c.QueryAsync<FavoriteRow>(sql, param)).ToList();
-            // Movie badge flags (video file / trailer present) — needs real
-            // filesystem checks, so compute them per favorited movie here.
+            // Use the same cloud-safe badge calculation as the library grid.
             if (t == "movie" && rows.Count > 0)
             {
                 var ids = rows.Select(r => r.TargetId).ToList();
-                var infos = (await c.QueryAsync<(long Id, string? Folder, string Number, string? Source)>(
-                    "SELECT id Id, folder_path Folder, number Number, source_path Source FROM movies WHERE id IN @ids",
-                    new { ids })).ToDictionary(x => x.Id);
+                var movies = (await c.QueryAsync<Movie>(
+                    "SELECT id Id, library_id LibraryId, folder_path FolderPath, number Number, source_path SourcePath FROM movies WHERE id IN @ids",
+                    new { ids })).ToList();
+                await MovieEndpoints.PrepareCardsAsync(movies, db);
+                var infos = movies.ToDictionary(m => m.Id);
                 foreach (var r in rows)
                 {
                     if (!infos.TryGetValue(r.TargetId, out var info)) continue;
-                    r.HasVideo = MovieEndpoints.HasVideoFile(info.Folder, info.Number, info.Source);
-                    r.HasTrailer = !string.IsNullOrWhiteSpace(info.Folder)
-                        && File.Exists(Path.Combine(info.Folder, $"{info.Number}-trailer.mp4"));
+                    r.HasVideo = info.HasVideo;
+                    r.HasTrailer = info.HasTrailer;
                 }
             }
             return Results.Ok(rows);

@@ -10,7 +10,8 @@ namespace Javideo.Worker.Services;
 public sealed class LibraryService
 {
     private readonly DbConnectionFactory _db;
-    public LibraryService(DbConnectionFactory db) => _db = db;
+    private readonly CloudIoService? _cloud;
+    public LibraryService(DbConnectionFactory db, CloudIoService? cloud = null) { _db = db; _cloud = cloud; }
 
     public async Task<List<Library>> ListAsync()
     {
@@ -69,17 +70,25 @@ public sealed class LibraryService
             "SELECT path FROM library_directories WHERE library_id=@id", new { id }, tx)).ToList();
         var directories = lib.Directories.Where(d => !string.IsNullOrWhiteSpace(d))
             .Select(d => Path.GetFullPath(d.Trim())).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var movies = await c.QueryAsync<(long Id, string? Folder, string? Source)>(
-            "SELECT id Id, folder_path Folder, source_path Source FROM movies WHERE library_id=@id", new { id }, tx);
+        var cacheRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(_db.DataDir, "cache")))
+            + Path.DirectorySeparatorChar;
+        var movies = await c.QueryAsync<(long Id, string? Folder, string? Source, string? SourceFolder)>(
+            "SELECT id Id, folder_path Folder, source_path Source, source_folder_path SourceFolder FROM movies WHERE library_id=@id", new { id }, tx);
+        Task<string?> Relocate(string? path, bool folder) => RelocatePath(path, oldDirectories, directories, folder, p =>
+            _cloud == null ? Task.FromResult(folder ? Directory.Exists(p) : File.Exists(p))
+                : _cloud.RunAsync(id, () => Task.Run(() => folder ? Directory.Exists(p) : File.Exists(p)), force: lib.CacheLocal));
         foreach (var movie in movies)
         {
-            // Cloud libraries keep metadata in the local cache; only their
-            // remote video source follows a changed library directory.
-            var folder = lib.CacheLocal ? movie.Folder : RelocatePath(movie.Folder, oldDirectories, directories, true);
-            var source = RelocatePath(movie.Source, oldDirectories, directories, false);
-            if (folder != movie.Folder || source != movie.Source)
-                await c.ExecuteAsync("UPDATE movies SET folder_path=@folder, source_path=@source WHERE id=@id",
-                    new { folder, source, id = movie.Id }, tx);
+            // Preserve actual cached metadata, not every folder in a library
+            // whose cache option was just enabled.
+            var cached = !string.IsNullOrWhiteSpace(movie.Folder)
+                && Path.GetFullPath(movie.Folder).StartsWith(cacheRoot, StringComparison.OrdinalIgnoreCase);
+            var folder = cached ? movie.Folder : await Relocate(movie.Folder, true);
+            var source = await Relocate(movie.Source, false);
+            var sourceFolder = await Relocate(movie.SourceFolder, true);
+            if (folder != movie.Folder || source != movie.Source || sourceFolder != movie.SourceFolder)
+                await c.ExecuteAsync("UPDATE movies SET folder_path=@folder, source_path=@source, source_folder_path=@sourceFolder WHERE id=@id",
+                    new { folder, source, sourceFolder, id = movie.Id }, tx);
         }
         await c.ExecuteAsync(
             "UPDATE libraries SET name=@name, metadata_source=@src, cache_local=@cacheLocal WHERE id=@id",
@@ -91,25 +100,34 @@ public sealed class LibraryService
         tx.Commit();
     }
 
-    private static string? RelocatePath(string? path, List<string> oldDirectories, List<string> directories, bool folder)
+    private static async Task<string?> RelocatePath(string? path, List<string> oldDirectories, List<string> directories, bool folder, Func<string, Task<bool>> exists)
     {
-        if (string.IsNullOrWhiteSpace(path)) return path;
-        bool Exists(string p) => folder ? Directory.Exists(p) : File.Exists(p);
+        if (string.IsNullOrWhiteSpace(path) || directories.Count == 0) return path;
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var old in oldDirectories)
+        var oldRoots = oldDirectories.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var root in oldRoots.Intersect(directories, StringComparer.OrdinalIgnoreCase))
         {
-            var oldRoot = Path.GetFullPath(old);
-            if (directories.Contains(oldRoot, StringComparer.OrdinalIgnoreCase)) continue;
+            var relative = Path.GetRelativePath(root, path);
+            if (!Path.IsPathRooted(relative) && relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar)) return path;
+        }
+        var removed = oldRoots.Except(directories, StringComparer.OrdinalIgnoreCase).ToList();
+        var added = directories.Except(oldRoots, StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var oldRoot in removed)
+        {
             var relative = Path.GetRelativePath(oldRoot, path);
             if (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar)) continue;
+            // ponytail: a single explicit root replacement needs no cloud stat;
+            // multiple roots still require an unambiguous existing match below.
+            if (removed.Count == 1 && added.Count == 1)
+                return Path.Combine(added[0], relative);
             foreach (var root in directories)
             {
                 var candidate = Path.Combine(root, relative);
-                if (Exists(candidate)) candidates.Add(candidate);
+                if (await exists(candidate)) candidates.Add(candidate);
             }
         }
         if (candidates.Count == 1) return candidates.Single();
-        if (Exists(path) || candidates.Count > 1) return path;
+        if (candidates.Count > 1 || await exists(path)) return path;
         // Also recover records from earlier versions that already saved the
         // new root without updating movie paths. Bind only an unambiguous match.
         var leaf = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
@@ -117,13 +135,13 @@ public sealed class LibraryService
         foreach (var root in directories)
         {
             var candidate = Path.Combine(root, leaf);
-            if (Exists(candidate)) candidates.Add(candidate);
+            if (await exists(candidate)) candidates.Add(candidate);
             if (!folder && Path.GetDirectoryName(path) is { } parent)
             {
                 var parentName = Path.GetFileName(Path.TrimEndingDirectorySeparator(parent));
                 if (string.IsNullOrWhiteSpace(parentName) || parentName is "." or "..") continue;
                 candidate = Path.Combine(root, parentName, leaf);
-                if (Exists(candidate)) candidates.Add(candidate);
+                if (await exists(candidate)) candidates.Add(candidate);
             }
         }
         return candidates.Count == 1 ? candidates.Single() : path;

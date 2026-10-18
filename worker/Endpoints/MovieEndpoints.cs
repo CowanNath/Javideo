@@ -30,6 +30,33 @@ public static class MovieEndpoints
         catch { return false; }
     }
 
+    internal static async Task PrepareCardsAsync(List<Movie> movies, DbConnectionFactory db)
+    {
+        await using var c = db.Create();
+        await c.OpenAsync();
+        var cloudLibraries = (await c.QueryAsync<(long Id, string? Status)>("SELECT id Id,cache_job_id || ':' || cache_status Status FROM libraries WHERE cache_local=1"))
+            .ToDictionary(row => row.Id, row => row.Status);
+        var dataRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(db.DataDir)) + Path.DirectorySeparatorChar;
+        foreach (var m in movies)
+        {
+            var version = cloudLibraries.GetValueOrDefault(m.LibraryId ?? 0) is { } status
+                ? "?v=" + StringComparer.Ordinal.GetHashCode(status).ToString("x") : "";
+            if (!string.IsNullOrWhiteSpace(m.FolderPath) || !string.IsNullOrWhiteSpace(m.CoverUrl))
+                m.CoverUrl = $"/api/movies/{m.Id}/image/poster{version}";
+            if (!string.IsNullOrWhiteSpace(m.FolderPath) || !string.IsNullOrWhiteSpace(m.ThumbUrl))
+                m.ThumbUrl = $"/api/movies/{m.Id}/image/thumb{version}";
+            // ponytail: badges use known sources and local metadata only.
+            // Never probe an uncached cloud folder while building a whole grid.
+            var folder = m.FolderPath;
+            if (cloudLibraries.ContainsKey(m.LibraryId ?? 0) && !string.IsNullOrWhiteSpace(folder)
+                && !Path.GetFullPath(folder).StartsWith(dataRoot, StringComparison.OrdinalIgnoreCase))
+                folder = null;
+            m.HasVideo = HasVideoFile(folder, m.Number, m.SourcePath);
+            m.HasTrailer = !string.IsNullOrWhiteSpace(folder)
+                && File.Exists(Path.Combine(folder, $"{m.Number}-trailer.mp4"));
+        }
+    }
+
     /// <summary>Load one movie with everything the detail UI needs: local
     /// poster/thumb paths, cached previews, actors, tags, magnets, trailer
     /// presence. Shared by /{id} and /by-number/{number}.</summary>
@@ -38,29 +65,21 @@ public static class MovieEndpoints
         await using var c = db.Create();
         await c.OpenAsync();
         var movie = await c.QueryFirstOrDefaultAsync<Movie>(@"
-            SELECT id Id, library_id LibraryId, number Number, title Title,
+            SELECT id Id, library_id LibraryId, number Number, title Title, original_title OriginalTitle,
                    summary Summary, maker Maker, label Label, series Series,
                    director Director, release_date ReleaseDate,
                    runtime_minutes RuntimeMinutes, cover_url CoverUrl,
                    thumb_url ThumbUrl, score Score, provider Provider,
-                   homepage_url HomepageUrl, folder_path FolderPath
+                   homepage_url HomepageUrl, folder_path FolderPath, source_path SourcePath
             FROM movies WHERE id=@id", new { id });
         if (movie == null) return null;
-        // Override cover/thumb to read from the local movie folder
-        // ({番号}-poster.jpg / {番号}-thumb.jpg) instead of the stored
-        // MetaTube remote URL, so the detail page works offline.
-        if (!string.IsNullOrWhiteSpace(movie.FolderPath))
-        {
-            var poster = Path.Combine(movie.FolderPath, $"{movie.Number}-poster.jpg");
-            var thumb = Path.Combine(movie.FolderPath, $"{movie.Number}-thumb.jpg");
-            if (File.Exists(poster)) movie.CoverUrl = $"/api/movies/{id}/image/poster";
-            if (File.Exists(thumb)) movie.ThumbUrl = $"/api/movies/{id}/image/thumb";
-        }
+        await PrepareCardsAsync([movie], db);
         // Serve preview images from the local cache (one entry per cached file),
         // pointing at the static preview endpoint so they work offline.
         var count = previews.Count(id);
+        var cacheVersion = movie.CoverUrl?.Split('?', 2).ElementAtOrDefault(1);
         movie.PreviewImages = Enumerable.Range(0, count)
-            .Select(n => $"/api/movies/{id}/preview/{n}").ToList();
+            .Select(n => $"/api/movies/{id}/preview/{n}" + (cacheVersion == null ? "" : "?" + cacheVersion)).ToList();
         movie.Actors = (await c.QueryAsync<Actor>(@"
             SELECT a.id Id, a.name Name, a.avatar_url AvatarUrl
             FROM actors a JOIN movie_actors ma ON ma.actor_id=a.id
@@ -77,9 +96,6 @@ public static class MovieEndpoints
         movie.Magnets = (await c.QueryAsync<MagnetResult>(@"
             SELECT title Title, size Size, magnet_uri MagnetUri, source Source
             FROM magnets WHERE movie_id=@id", new { id })).ToList();
-        // Report whether a {番号}-trailer.mp4 exists in the movie folder.
-        movie.HasTrailer = !string.IsNullOrWhiteSpace(movie.FolderPath)
-            && File.Exists(Path.Combine(movie.FolderPath, $"{movie.Number}-trailer.mp4"));
         return movie;
     }
 
@@ -99,16 +115,7 @@ public static class MovieEndpoints
                        cover_url CoverUrl, thumb_url ThumbUrl, score Score, folder_path FolderPath,
                        source_path SourcePath
                 FROM movies ORDER BY id DESC")).ToList();
-            foreach (var m in movies)
-            {
-                if (!string.IsNullOrWhiteSpace(m.CoverUrl))
-                    m.CoverUrl = $"/api/movies/{m.Id}/image/poster";
-                if (!string.IsNullOrWhiteSpace(m.ThumbUrl))
-                    m.ThumbUrl = $"/api/movies/{m.Id}/image/thumb";
-                m.HasVideo = HasVideoFile(m.FolderPath, m.Number ?? "", m.SourcePath);
-                m.HasTrailer = !string.IsNullOrWhiteSpace(m.FolderPath)
-                    && File.Exists(Path.Combine(m.FolderPath, $"{m.Number}-trailer.mp4"));
-            }
+            await PrepareCardsAsync(movies, db);
             return Results.Ok(movies);
         });
 
@@ -124,23 +131,7 @@ public static class MovieEndpoints
                        cover_url CoverUrl, thumb_url ThumbUrl, score Score, folder_path FolderPath,
                        source_path SourcePath
                 FROM movies WHERE library_id=@id ORDER BY id DESC", new { id = libraryId })).ToList();
-            // Override cover/thumb to local file paths when they exist, so the
-            // webview doesn't hit external dmm URLs (which get blocked by
-            // tracking prevention).
-            foreach (var m in movies)
-            {
-                // Always route through the local image endpoint — it serves from
-                // disk if available, or proxies the remote URL otherwise. This
-                // prevents the webview from hitting dmm directly (Tracking Prevention).
-                if (!string.IsNullOrWhiteSpace(m.CoverUrl))
-                    m.CoverUrl = $"/api/movies/{m.Id}/image/poster";
-                if (!string.IsNullOrWhiteSpace(m.ThumbUrl))
-                    m.ThumbUrl = $"/api/movies/{m.Id}/image/thumb";
-                // Card badges: video file present / trailer downloaded.
-                m.HasVideo = HasVideoFile(m.FolderPath, m.Number ?? "", m.SourcePath);
-                m.HasTrailer = !string.IsNullOrWhiteSpace(m.FolderPath)
-                    && File.Exists(Path.Combine(m.FolderPath, $"{m.Number}-trailer.mp4"));
-            }
+            await PrepareCardsAsync(movies, db);
             return Results.Ok(movies);
         });
 
@@ -167,6 +158,19 @@ public static class MovieEndpoints
             return movie == null ? Results.NotFound() : Results.Ok(movie);
         });
 
+        // Cloud availability is checked separately so local details never wait
+        // for the mount or its shared I/O queue.
+        g.MapGet("/{id:long}/trailer-status", async (long id, DbConnectionFactory db) =>
+        {
+            await using var c = db.Create();
+            await c.OpenAsync();
+            var row = await c.QueryFirstOrDefaultAsync<(string? Folder, string Number)>(
+                "SELECT folder_path Folder, number Number FROM movies WHERE id=@id", new { id });
+            if (row.Number == null) return Results.NotFound();
+            return Results.Ok(new { hasTrailer = !string.IsNullOrWhiteSpace(row.Folder)
+                && File.Exists(Path.Combine(row.Folder, $"{row.Number}-trailer.mp4")) });
+        });
+
         // Serve the trailer file (streaming) for inline playback.
         g.MapGet("/{id:long}/trailer", async (long id, DbConnectionFactory db) =>
         {
@@ -182,7 +186,7 @@ public static class MovieEndpoints
         // Serve the local poster/thumb image from the movie folder.
         // Falls back to proxying the remote URL (from DB) so the webview never
         // hits dmm directly (avoids Tracking Prevention blocking).
-        g.MapGet("/{id:long}/image/{type}", async (long id, string type, DbConnectionFactory db) =>
+        g.MapGet("/{id:long}/image/{type}", async (long id, string type, DbConnectionFactory db, CancellationToken ct) =>
         {
             await using var c = db.Create();
             await c.OpenAsync();
@@ -215,7 +219,7 @@ public static class MovieEndpoints
                 {
                     try
                     {
-                        var imgBytes = await ImageHttp.GetByteArrayAsync(tryUrl);
+                        var imgBytes = await ImageHttp.GetByteArrayAsync(tryUrl, ct);
                         if (imgBytes.Length > 0) return Results.File(imgBytes, "image/jpeg");
                     }
                     catch { /* try next variant */ }

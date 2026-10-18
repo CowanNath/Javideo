@@ -61,11 +61,14 @@ async function doScrape(q: string, provider: string, id: string, seq: number): P
   }
 }
 
-async function scrapeAndTranslate(q: string, provider: string, id: string, seq: number) {
+async function scrapeAndLoadExtras(q: string, provider: string, id: string, seq: number) {
   const m = await doScrape(q, provider, id, seq)
   if (seq !== resultSeq) return
   stepScrape.value = m ? 1 : -1
-  if (!m) { stepTranslate.value = -1; return }
+  if (m) await loadExtras(q, m, seq)
+}
+
+async function translateMovie(m: Movie, seq: number) {
   if (!m.title?.trim() && !m.summary?.trim()) { stepTranslate.value = 1; return }
   try {
     const r = await translate.run(m.title, m.summary)
@@ -87,9 +90,15 @@ async function pickCandidate(i: number) {
   error.value = ''
   stepScrape.value = 0
   stepTranslate.value = 0
+  stepMagnet.value = 0
+  stepTrailer.value = 0
+  magLoading.value = false
+  trailerRequest?.abort()
   store.movie = null
+  store.grouped = []
+  trailerUrl.value = store.trailerUrl = ''
   try {
-    await scrapeAndTranslate(store.query, c.provider, c.id, seq)
+    await scrapeAndLoadExtras(store.query, c.provider, c.id, seq)
   } finally {
     if (seq === resultSeq) scraping.value = false
   }
@@ -128,14 +137,51 @@ function groupBySource(magnets: MagnetResult[]): MagnetSourceResult[] {
   return [...bySrc.entries()].map(([source, results]) => ({ source, count: results.length, results }))
 }
 
+async function loadExtras(q: string, movie: Movie, seq: number, stored = false) {
+  if (seq !== resultSeq) return
+  trailerRequest = new AbortController()
+  const trailerSignal = trailerRequest.signal
+  // ponytail: metadata gates all three tasks; reuse local results before querying.
+  const translateP = stored
+    ? Promise.resolve().then(() => { if (seq === resultSeq) stepTranslate.value = 1 })
+    : translateMovie(movie, seq)
+
+  const localMagnets = movie.magnets ?? []
+  magLoading.value = !localMagnets.length
+  const magP = (localMagnets.length
+    ? Promise.resolve().then(() => {
+        if (seq !== resultSeq) return
+        store.grouped = groupBySource(localMagnets)
+        stepMagnet.value = 1
+      })
+    : magnet.searchGrouped(q)
+      .then((r) => { if (seq === resultSeq) { store.grouped = r; stepMagnet.value = 1 } })
+      .catch(() => { if (seq === resultSeq) stepMagnet.value = -1 }))
+    .finally(() => { if (seq === resultSeq) magLoading.value = false })
+
+  const trailerP = (movie.hasTrailer && movie.id
+    ? moviesApi.trailerUrl(movie.id).then((u) => {
+        if (seq !== resultSeq) return
+        trailerUrl.value = store.trailerUrl = u
+        stepTrailer.value = 1
+      })
+    : metatube.findTrailer(q, trailerSignal)
+      .then((tr) => {
+        if (seq !== resultSeq) return
+        trailerUrl.value = store.trailerUrl = tr.ok && tr.url ? tr.url : ''
+        stepTrailer.value = tr.ok && tr.url ? 1 : -1
+      }))
+    .catch(() => { if (seq === resultSeq) { trailerUrl.value = store.trailerUrl = ''; stepTrailer.value = -1 } })
+
+  await Promise.allSettled([translateP, magP, trailerP])
+}
+
 async function search() {
   const q = query.value.trim()
   if (!q) return
   const seq = ++searchSeq
   const resultToken = ++resultSeq
   trailerRequest?.abort()
-  trailerRequest = new AbortController()
-  const trailerSignal = trailerRequest.signal
   error.value = ''
   needsConfig.value = false
   store.query = q
@@ -151,7 +197,7 @@ async function search() {
   stepTrailer.value = 0
   stepTranslate.value = 0
   scraping.value = true
-  magLoading.value = true
+  magLoading.value = false
 
   // Local-first: check the library before any network call. An ingested 番号
   // serves its stored record (real id → "已入库" badge), stored magnets and
@@ -161,24 +207,23 @@ async function search() {
   if (seq !== searchSeq) return
 
   // First, fetch all candidates so the user can pick if there are multiple.
-  const scrapeP = (async () => {
+  try {
     if (stored) {
       if (resultToken !== resultSeq) return
       store.movie = stored
       stepScrape.value = 1
-      stepTranslate.value = 1 // 库内数据已是入库时处理过的内容
+      await loadExtras(q, stored, resultToken, true)
       return
     }
     await metatube.candidates(q)
       .then(async (list) => {
-        if (seq !== searchSeq) return
+        if (seq !== searchSeq || resultToken !== resultSeq) return
         if (list.length === 0) {
           stepScrape.value = -1
           return
         }
-        if (resultToken !== resultSeq) return
         if (list.length > 1) candidates.value = list
-        await scrapeAndTranslate(q, list[0].provider, list[0].id, resultToken)
+        await scrapeAndLoadExtras(q, list[0].provider, list[0].id, resultToken)
       })
       .catch((e) => {
         if (seq !== searchSeq || resultToken !== resultSeq) return
@@ -190,41 +235,13 @@ async function search() {
           error.value = `${t('scrapeFailed')}: ${e.message}`
         }
       })
-  })()
-  // Grouped magnet search (#10/#11) — stored magnets serve locally, grouped
-  // per source; network search only when the library has none.
-  const localMagnets = stored?.magnets ?? []
-  const magP = localMagnets.length
-    ? Promise.resolve().then(() => {
-        if (seq !== searchSeq) return
-        store.grouped = groupBySource(localMagnets)
-        stepMagnet.value = 1
-      })
-    : magnet.searchGrouped(q)
-      .then((r) => { if (seq === searchSeq) { store.grouped = r; stepMagnet.value = 1 } })
-      .catch(() => { if (seq === searchSeq) stepMagnet.value = -1 })
-
-  // Trailer — the local {番号}-trailer.mp4 streams straight from the worker;
-  // DMM probe/download only when no local file exists.
-  const trailerP = stored?.hasTrailer && stored.id
-    ? moviesApi.trailerUrl(stored.id).then((u) => {
-        if (seq !== searchSeq) return
-        trailerUrl.value = store.trailerUrl = u
-        stepTrailer.value = 1
-      })
-    : metatube.findTrailer(q, trailerSignal)
-      .then((tr) => {
-        if (seq !== searchSeq) return
-        trailerUrl.value = store.trailerUrl = tr.ok && tr.url ? tr.url : ''
-        stepTrailer.value = tr.ok && tr.url ? 1 : -1
-      })
-      .catch(() => { if (seq === searchSeq) { trailerUrl.value = store.trailerUrl = ''; stepTrailer.value = -1 } })
-
-  await Promise.allSettled([scrapeP, magP, trailerP])
-  if (seq !== searchSeq) return
-  if (resultToken === resultSeq) scraping.value = false
-  magLoading.value = false
-  store.lastSearchAt = Date.now()
+  } finally {
+    if (seq === searchSeq && resultToken === resultSeq) {
+      scraping.value = false
+      magLoading.value = false
+      store.lastSearchAt = Date.now()
+    }
+  }
 }
 
 // #5: prompt when no library selected before ingesting.
@@ -301,7 +318,7 @@ async function ingest() {
         ]" :key="s.label" class="flex items-center gap-1.5 text-[12px]">
           <span
             class="w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0 transition-colors"
-            :class="s.state === 1 ? 'bg-green-500 text-white' : s.state === -1 ? 'bg-red-500/30 text-red-400' : 'bg-surface3 text-muted animate-pulse'"
+            :class="[s.state === 1 ? 'bg-green-500 text-white' : s.state === -1 ? 'bg-red-500/30 text-red-400' : 'bg-surface3 text-muted', { 'animate-pulse': scraping && s.state === 0 }]"
           >
             <span v-if="s.state === 1" class="i-carbon-checkmark" />
             <span v-else-if="s.state === -1" class="i-carbon-close" />

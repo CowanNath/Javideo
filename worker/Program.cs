@@ -42,6 +42,9 @@ try
     builder.Services.AddSingleton<MagnetService>();
     builder.Services.AddSingleton<Scanner>();
     builder.Services.AddSingleton<LibraryService>();
+    builder.Services.AddSingleton<CloudIoService>();
+    builder.Services.AddSingleton<LibraryCacheService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<LibraryCacheService>());
     builder.Services.AddSingleton<NfoWriter>();
     builder.Services.AddSingleton<IngestService>();
     builder.Services.AddSingleton<PlayerService>();
@@ -74,6 +77,8 @@ try
 
     // ---- CORS: allow the Tauri webview origin ----
     app.UseCors();
+    app.Use((HttpContext context, RequestDelegate next) =>
+        context.RequestServices.GetRequiredService<CloudIoService>().InvokeAsync(context, next));
 
     // ---- Endpoints ----
     app.MapHealthEndpoints();

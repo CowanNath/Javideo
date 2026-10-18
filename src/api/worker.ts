@@ -89,6 +89,7 @@ export const libraries = {
   update: (id: number, l: Partial<import('../types').Library>) =>
     req<import('../types').Library>(`/api/libraries/${id}`, { method: 'PUT', body: JSON.stringify(l) }),
   remove: (id: number) => req<void>(`/api/libraries/${id}`, { method: 'DELETE' }),
+  retryCache: (id: number) => req<import('../types').LibraryCacheStatus>(`/api/libraries/${id}/cache`, { method: 'POST' }),
   checkDir: (path: string) =>
     req<{ exists: boolean }>(`/api/libraries/check-dir?path=${encodeURIComponent(path)}`),
   checkName: (name: string, exclude?: number) =>
@@ -114,10 +115,10 @@ async function hydrateActorAvatars(actors?: import('../types').Actor[]) {
 
 export const movies = {
   // All ingested movies across every library (the virtual "全部" library).
-  all: async (): Promise<import('../types').Movie[]> =>
-    hydrateCovers((await req<import('../types').Movie[]>('/api/movies/library/all')) ?? []),
-  byLibrary: async (libraryId: number): Promise<import('../types').Movie[]> => {
-    const list = (await req<import('../types').Movie[]>(`/api/movies/library/${libraryId}`)) ?? []
+  all: async (signal?: AbortSignal): Promise<import('../types').Movie[]> =>
+    hydrateCovers((await req<import('../types').Movie[]>('/api/movies/library/all', { signal })) ?? []),
+  byLibrary: async (libraryId: number, signal?: AbortSignal): Promise<import('../types').Movie[]> => {
+    const list = (await req<import('../types').Movie[]>(`/api/movies/library/${libraryId}`, { signal })) ?? []
     return hydrateCovers(list)
   },
   // Look up an ingested movie by 番号 (any library). 404 → throws; caller
@@ -132,8 +133,8 @@ export const movies = {
     await hydrateActorAvatars(m.actors)
     return m
   },
-  get: async (id: number): Promise<import('../types').Movie> => {
-    const m = await req<import('../types').Movie>(`/api/movies/${id}`)
+  get: async (id: number, signal?: AbortSignal): Promise<import('../types').Movie> => {
+    const m = await req<import('../types').Movie>(`/api/movies/${id}`, { signal })
     // Hydrate relative local-image paths to absolute URLs.
     m.coverUrl = await absoluteAvatar(m.coverUrl)
     m.thumbUrl = await absoluteAvatar(m.thumbUrl)
@@ -183,6 +184,8 @@ export const movies = {
     req<{ ok: boolean; detail: string }>(`/api/movies/${id}/play`, { method: 'POST' }),
   // Trailer (DMM free preview) file URL for inline playback.
   trailerUrl: async (id: number) => `${await getBaseUrl()}/api/movies/${id}/trailer`,
+  trailerStatus: (id: number, signal?: AbortSignal) =>
+    req<{ hasTrailer: boolean }>(`/api/movies/${id}/trailer-status`, { signal }),
   // Remove a movie (optionally wipe its generated folder).
   remove: (id: number, removeFiles = false) =>
     req<void>(`/api/movies/${id}?removeFiles=${removeFiles}`, { method: 'DELETE' }),

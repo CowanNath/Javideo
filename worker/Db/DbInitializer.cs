@@ -73,6 +73,9 @@ public static class DbInitializer
         // Where the video file actually lives (set for cache_local libraries —
         // the video stays on the cloud drive while metadata is cached locally).
         try { await conn.ExecuteAsync("ALTER TABLE movies ADD COLUMN source_path TEXT;"); } catch { }
+        try { await conn.ExecuteAsync("ALTER TABLE movies ADD COLUMN source_folder_path TEXT;"); } catch { }
+        try { await conn.ExecuteAsync("ALTER TABLE libraries ADD COLUMN cache_job_id TEXT;"); } catch { }
+        try { await conn.ExecuteAsync("ALTER TABLE libraries ADD COLUMN cache_status TEXT;"); } catch { }
 
         // User highlights are never rebuilt by scraping.
         await conn.ExecuteAsync("""
